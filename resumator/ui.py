@@ -37,9 +37,21 @@ ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS = 10
 SEND_MOUSE_SUSPEND_SECONDS = 15
 WH_MOUSE_LL = 14
 HC_ACTION = 0
+LLMHF_INJECTED = 0x00000001
+LLMHF_LOWER_IL_INJECTED = 0x00000002
 CALLBACK_FACTORY = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 LOW_LEVEL_MOUSE_PROC = CALLBACK_FACTORY(wintypes.LPARAM, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 _TCL_DLL = None
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", wintypes.POINT),
+        ("mouseData", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", wintypes.WPARAM),
+    ]
 
 
 def _initialize_tcl_runtime() -> None:
@@ -747,17 +759,14 @@ class ResumatorApp:
             f"destino={assistant_key} modo={delivery_mode} pdfs={[str(path) for path in self.pdf_paths]} "
             f"docx={prompt_document_path}"
         )
-        self.root.after(
-            _mouse_suspend_ms(SEND_MOUSE_SUSPEND_SECONDS),
-            lambda: self._start_send_worker(
-                assistant_key,
-                prompt,
-                list(self.pdf_paths),
-                self.attach_var.get(),
-                self.submit_var.get(),
-                delivery_mode,
-                prompt_document_path,
-            ),
+        self._start_send_worker(
+            assistant_key,
+            prompt,
+            list(self.pdf_paths),
+            self.attach_var.get(),
+            self.submit_var.get(),
+            delivery_mode,
+            prompt_document_path,
         )
 
     def _effective_delivery_mode(self, assistant_key: str) -> str:
@@ -1129,6 +1138,12 @@ class ResumatorApp:
 
         def block_mouse(n_code: int, w_param: int, l_param: int) -> int:
             if n_code >= HC_ACTION:
+                try:
+                    mouse_info = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                    if mouse_info.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED):
+                        return user32.CallNextHookEx(self._mouse_block_hook or None, n_code, w_param, l_param)
+                except Exception:
+                    pass
                 return 1
             return user32.CallNextHookEx(self._mouse_block_hook or None, n_code, w_param, l_param)
 
@@ -1155,8 +1170,6 @@ class ResumatorApp:
                 self._mouse_block_hook = int(hook_handle)
         except Exception as exc:  # noqa: BLE001 - mouse blocking is best-effort protection
             write_exception("Falha ao instalar bloqueio temporario do mouse", exc)
-
-        self._confine_mouse_to_current_position()
 
     def _confine_mouse_to_current_position(self) -> None:
         if os.name != "nt":

@@ -6,6 +6,8 @@ Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs
 
 Baixe o instalador Windows em [`downloads/Resumator_10_Setup.exe`](downloads/Resumator_10_Setup.exe).
 
+Versao atualizada em 22/06/2026 com correcoes na automacao de envio e captura.
+
 ## Assistente de Prompt
 
 O botao "Assistente" abre uma janela grande com alternativas de escolha unica para:
@@ -69,7 +71,11 @@ No modo "Texto colado", o prompt e colado no campo de mensagem e os PDFs sao ane
 
 No modo "Documento DOCX", o Resumator cria um DOCX temporario com o prompt e anexa esse arquivo junto dos PDFs. No Copilot, este e o unico modo permitido.
 
-Copilot, Gemini e Claude podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta colar os arquivos como anexos e mantem o envio pausado para conferencia.
+O acionamento da IA e o envio com anexos começam imediatamente após a autorização. A suspensão temporária do mouse serve apenas para evitar interferência do usuário durante a abertura da IA, anexação dos arquivos e remessa do prompt.
+
+Copilot, Gemini e Claude podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta alternativas de anexo. No Microsoft 365 Copilot, se o seletor de arquivos nao for confirmado, o Resumator cola os arquivos pela area de transferencia e prossegue automaticamente com o envio. Nos demais destinos, quando o anexo nao puder ser confirmado, o envio pode ficar pausado para conferencia.
+
+A captura automatica procura o botao "Copiar" da resposta mais recente. No ChatGPT Desktop, a rotina foi ajustada para evitar falha quando o Windows UI Automation nao expõe um ponto clicavel direto.
 
 ## Integracao com QUIMERA
 

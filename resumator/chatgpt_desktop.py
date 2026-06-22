@@ -70,6 +70,7 @@ class DesktopAssistant:
     require_visible_window: bool = False
     supports_clipboard_file_paste: bool = True
     supports_file_dialog_attachment: bool = False
+    trust_clipboard_attachment_fallback: bool = False
     attachment_button_terms: tuple[str, ...] = (
         "anexar",
         "anexo",
@@ -78,8 +79,14 @@ class DesktopAssistant:
         "adicionar arquivo",
         "adicionar conteudo",
         "adicionar conteúdo",
+        "adicionar e gerenciar fontes",
+        "gerenciar fontes",
+        "fontes",
         "add content",
         "add file",
+        "add sources",
+        "manage sources",
+        "sources",
         "upload",
         "paperclip",
         "clip",
@@ -96,6 +103,9 @@ class DesktopAssistant:
         "attach files",
         "adicionar arquivo",
         "adicionar arquivos",
+        "adicionar fontes",
+        "add sources",
+        "sources",
         "do computador",
         "do dispositivo",
         "from computer",
@@ -124,7 +134,7 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         key="chatgpt",
         display_name="ChatGPT Desktop",
         window_keywords=("chatgpt",),
-        process_keywords=("chatgpt", "openai"),
+        process_keywords=("chatgpt",),
         launch_paths=(
             r"%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe",
             r"%LOCALAPPDATA%\Microsoft\WindowsApps\ChatGPT.exe",
@@ -149,6 +159,7 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         require_visible_window=True,
         supports_clipboard_file_paste=False,
         supports_file_dialog_attachment=True,
+        trust_clipboard_attachment_fallback=True,
         launch_urls_first=True,
     ),
     "claude": DesktopAssistant(
@@ -808,7 +819,7 @@ def _invoke_copy_response_action(assistant: DesktopAssistant, target: AssistantT
     if not hwnd:
         return False, "Nao ha janela ativa para procurar o botao de copiar."
 
-    invoked, detail = _invoke_uia_action(hwnd, assistant.response_copy_terms)
+    invoked, detail = _invoke_uia_action(hwnd, assistant.response_copy_terms, "botao de copiar resposta")
     _log_automation(f"{assistant.display_name}: tentativa UIA de copiar resposta: {detail}")
     if invoked:
         return True, "Botao de copiar resposta acionado por UI Automation."
@@ -964,14 +975,18 @@ $buttonCondition = [System.Windows.Automation.PropertyCondition]::new(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::Button
 )
+$rootRect = $root.Current.BoundingRectangle
 $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $buttonCondition)
 $best = $null
 $bestScore = 0
 $bestName = ""
+$bestType = ""
+$bestRect = $null
 
 foreach ($button in $buttons) {
     try {
         if (-not $button.Current.IsEnabled) { continue }
+        if ($button.Current.IsOffscreen) { continue }
         $rect = $button.Current.BoundingRectangle
         if ($rect.IsEmpty) { continue }
         $width = [int][Math]::Round($rect.Width)
@@ -989,15 +1004,57 @@ foreach ($button in $buttons) {
                 ([System.Drawing.Size]::new($width, $height))
             )
             $score = Get-CopyIconScore $bitmap
-            $score += [Math]::Min(8, [Math]::Max(0, $rect.Top / 180.0))
             $name = [string]$button.Current.Name
-            if ($name.ToLowerInvariant().Contains("copy") -or $name.ToLowerInvariant().Contains("copiar")) {
-                $score += 40
+            $automationId = [string]$button.Current.AutomationId
+            $helpText = [string]$button.Current.HelpText
+            $haystack = ("$name $automationId $helpText").ToLowerInvariant()
+            if ($haystack.Contains("copy") -or $haystack.Contains("copiar")) {
+                $score += 80
+            } elseif (-not [string]::IsNullOrWhiteSpace($name)) {
+                $score -= 45
+            }
+            if (
+                $haystack.Contains("inicializador") -or
+                $haystack.Contains("launcher") -or
+                $haystack.Contains("configura") -or
+                $haystack.Contains("settings") -or
+                $haystack.Contains("more") -or
+                $haystack.Contains("mais") -or
+                $haystack.Contains("novo chat") -or
+                $haystack.Contains("new chat") -or
+                $haystack.Contains("modelo") -or
+                $haystack.Contains("model") -or
+                $haystack.Contains("fonte") -or
+                $haystack.Contains("source") -or
+                $haystack.Contains("adicionar") -or
+                $haystack.Contains("add") -or
+                $haystack.Contains("anex") -or
+                $haystack.Contains("attach") -or
+                $haystack.Contains("upload") -or
+                $haystack.Contains("ditado") -or
+                $haystack.Contains("dictation") -or
+                $haystack.Contains("rolar") -or
+                $haystack.Contains("scroll") -or
+                $haystack.Contains("minimize") -or
+                $haystack.Contains("maximize") -or
+                $haystack.Contains("fechar") -or
+                $haystack.Contains("close")
+            ) {
+                $score -= 120
+            }
+            if (-not $rootRect.IsEmpty -and $rootRect.Height -gt 0 -and $rootRect.Width -gt 0) {
+                $relativeX = (($rect.Left + ($rect.Width / 2.0)) - $rootRect.Left) / [double]$rootRect.Width
+                $relativeY = (($rect.Top + ($rect.Height / 2.0)) - $rootRect.Top) / [double]$rootRect.Height
+                if ($relativeY -lt 0.22) { $score -= 100 }
+                if ($relativeX -lt 0.12) { $score -= 40 }
+                if ($relativeY -gt 0.28 -and $relativeY -lt 0.92) { $score += 12 }
             }
             if ($score -gt $bestScore) {
                 $bestScore = $score
                 $best = $button
                 $bestName = $name
+                $bestType = [string]$button.Current.ControlType.ProgrammaticName
+                $bestRect = $rect
             }
         } finally {
             $graphics.Dispose()
@@ -1014,12 +1071,22 @@ if ($null -eq $best -or $bestScore -lt 55) {
 }
 
 try {
-    $point = $best.GetClickablePoint()
-    [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new([int]$point.X, [int]$point.Y)
+    try {
+        $point = $best.GetClickablePoint()
+        $clickX = [int]$point.X
+        $clickY = [int]$point.Y
+    } catch {
+        if ($null -eq $bestRect -or $bestRect.IsEmpty) {
+            throw
+        }
+        $clickX = [int][Math]::Round($bestRect.Left + ($bestRect.Width / 2.0))
+        $clickY = [int][Math]::Round($bestRect.Top + ($bestRect.Height / 2.0))
+    }
+    [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new($clickX, $clickY)
     [Resumator.NativeMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 80
     [Resumator.NativeMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-    Write-Output ("CLICKED|score=" + $bestScore + "|name=" + $bestName)
+    Write-Output ("CLICKED|score=" + $bestScore + "|name=" + $bestName + "|type=" + $bestType)
     exit 0
 } catch {
     Write-Output ("FAILED|" + $_.Exception.Message)
@@ -1259,9 +1326,19 @@ foreach ($element in $elements) {
                 $haystack.Contains("arquivo") -or
                 $haystack.Contains("file") -or
                 $haystack.Contains("add content") -or
-                $haystack.Contains("adicionar conte")
+                $haystack.Contains("adicionar conte") -or
+                $haystack.Contains("gerenciar fontes") -or
+                $haystack.Contains("fontes") -or
+                $haystack.Contains("sources")
             ) {
                 $score += 65
+            }
+            if (
+                $haystack.Contains("adicionar e gerenciar fontes") -or
+                $haystack.Contains("add sources") -or
+                $haystack.Contains("manage sources")
+            ) {
+                $score += 70
             }
             if ($haystack.Contains("plus") -or $haystack.Contains("adicionar")) {
                 $score += 25
@@ -1269,8 +1346,11 @@ foreach ($element in $elements) {
             if (
                 $haystack.Contains("copy") -or
                 $haystack.Contains("copiar") -or
+                $haystack.Contains("more") -or
+                $haystack.Contains("mais") -or
                 $haystack.Contains("new chat") -or
                 $haystack.Contains("novo chat") -or
+                $haystack.Contains("configura") -or
                 $haystack.Contains("refresh") -or
                 $haystack.Contains("atualizar")
             ) {
@@ -1432,6 +1512,14 @@ def _attach_files_to_assistant(
         if clipboard_attempted:
             _hotkey("ctrl", "v")
             time.sleep(assistant.attachment_wait_seconds)
+            if assistant.trust_clipboard_attachment_fallback:
+                return AttachmentResult(
+                    True,
+                    [
+                        "Nao consegui confirmar o seletor de arquivos; colei os arquivos pela area de transferencia.",
+                        "O envio automatico prosseguiu com o anexo por fallback.",
+                    ],
+                )
             return AttachmentResult(
                 False,
                 [
@@ -1446,13 +1534,13 @@ def _attach_files_to_assistant(
 def _open_attachment_dialog(assistant: DesktopAssistant, target: AssistantTarget) -> bool:
     hwnd = target.hwnd or _foreground_window_handle()
     if hwnd:
-        invoked, detail = _invoke_uia_action(hwnd, assistant.attachment_button_terms)
+        invoked, detail = _invoke_uia_action(hwnd, assistant.attachment_button_terms, "controle de anexo")
         _log_automation(f"{assistant.display_name}: tentativa de acionar botao de anexo: {detail}")
         if invoked and _wait_for_file_dialog(timeout_seconds=3.0):
             return True
 
         foreground = _foreground_window_handle() or hwnd
-        invoked_menu, detail_menu = _invoke_uia_action(foreground, assistant.attachment_menu_terms)
+        invoked_menu, detail_menu = _invoke_uia_action(foreground, assistant.attachment_menu_terms, "menu de arquivo")
         _log_automation(f"{assistant.display_name}: tentativa de acionar menu de arquivo: {detail_menu}")
         if invoked_menu and _wait_for_file_dialog(timeout_seconds=3.0):
             return True
@@ -1465,7 +1553,11 @@ def _open_attachment_dialog(assistant: DesktopAssistant, target: AssistantTarget
 
             time.sleep(0.3)
             foreground = _foreground_window_handle() or hwnd
-            invoked_visual_menu, detail_visual_menu = _invoke_uia_action(foreground, assistant.attachment_menu_terms)
+            invoked_visual_menu, detail_visual_menu = _invoke_uia_action(
+                foreground,
+                assistant.attachment_menu_terms,
+                "menu de arquivo",
+            )
             _log_automation(
                 f"{assistant.display_name}: tentativa de acionar menu de arquivo apos icone: {detail_visual_menu}"
             )
@@ -1475,11 +1567,12 @@ def _open_attachment_dialog(assistant: DesktopAssistant, target: AssistantTarget
     return bool(_wait_for_file_dialog(timeout_seconds=0.5))
 
 
-def _invoke_uia_action(hwnd: int, terms: tuple[str, ...]) -> tuple[bool, str]:
+def _invoke_uia_action(hwnd: int, terms: tuple[str, ...], action_label: str = "controle") -> tuple[bool, str]:
     if not hwnd or not terms:
         return False, "janela ou termos de busca ausentes"
 
     terms_json = json.dumps(list(terms), ensure_ascii=False)
+    action_label_json = json.dumps(action_label, ensure_ascii=False)
     script = f"""
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName UIAutomationClient
@@ -1492,6 +1585,7 @@ public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, U
 $terms = ConvertFrom-Json @'
 {terms_json}
 '@
+$actionLabel = {action_label_json}
 $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{int(hwnd)})
 if ($null -eq $root) {{
     Write-Output "NOT_FOUND|janela nao exposta ao UI Automation"
@@ -1506,10 +1600,19 @@ $bestScore = 0
 foreach ($element in $elements) {{
     try {{
         if (-not $element.Current.IsEnabled) {{ continue }}
+        if ($element.Current.IsOffscreen) {{ continue }}
         $name = [string]$element.Current.Name
         $automationId = [string]$element.Current.AutomationId
         $helpText = [string]$element.Current.HelpText
         $controlType = [string]$element.Current.ControlType.ProgrammaticName
+        if (
+            -not $controlType.Contains("Button") -and
+            -not $controlType.Contains("MenuItem") -and
+            -not $controlType.Contains("Hyperlink") -and
+            -not $controlType.Contains("ListItem")
+        ) {{
+            continue
+        }}
         $haystack = ("$name $automationId $helpText $controlType").ToLowerInvariant()
         $score = 0
         foreach ($term in $terms) {{
@@ -1527,10 +1630,11 @@ foreach ($element in $elements) {{
     }}
 }}
 if ($null -eq $best) {{
-    Write-Output "NOT_FOUND|nenhum controle de anexo localizado"
+    Write-Output ("NOT_FOUND|nenhum " + $actionLabel + " localizado")
     exit 2
 }}
 $bestName = [string]$best.Current.Name
+$bestRect = $best.Current.BoundingRectangle
 try {{
     $pattern = $best.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     $pattern.Invoke()
@@ -1538,8 +1642,18 @@ try {{
     exit 0
 }} catch {{
     try {{
-        $point = $best.GetClickablePoint()
-        [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$point.X, [int]$point.Y)
+        try {{
+            $point = $best.GetClickablePoint()
+            $clickX = [int]$point.X
+            $clickY = [int]$point.Y
+        }} catch {{
+            if ($bestRect.IsEmpty) {{
+                throw
+            }}
+            $clickX = [int][Math]::Round($bestRect.Left + ($bestRect.Width / 2.0))
+            $clickY = [int][Math]::Round($bestRect.Top + ($bestRect.Height / 2.0))
+        }}
+        [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new($clickX, $clickY)
         [Resumator.NativeMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 80
         [Resumator.NativeMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
