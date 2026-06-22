@@ -57,10 +57,10 @@ O botao "Assistente" abre uma janela grande com alternativas de escolha unica pa
 1. Abra o Resumator 10.
 2. Crie um prompt em "Personalizado", importe prompts ou use o "Assistente".
 3. Selecione de 1 a 10 PDFs.
-4. Escolha o destino de IA.
+4. Escolha o destino de IA. Quando a IA abrir, não feche a janela da IA.
 5. Escolha o modo de envio: texto colado ou documento DOCX.
-6. Envie o prompt e os documentos.
-7. Capture a resposta ou cole o texto manualmente.
+6. Envie o prompt e os documentos.O mouse será suspenso para inserir o anexo.
+7. Aguarde a IA terminar a resposta. Então capture a resposta ou cole o texto manualmente.
 8. Exporte em PDF, DOCX, JSON ou acione o QUIMERA.
 
 ## Automacao local
