@@ -73,7 +73,7 @@ Copilot, Gemini e Claude podem mudar a interface. Quando o botao de anexo nao fo
 
 ## Integracao com QUIMERA
 
-O botao direto usa o argumento `--summary-file` do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 10. A exportacao manual em JSON continua disponivel como alternativa.
+O QUIMERA ainda está em fase de desenvolvimento.
 
 ## Arquivos principais
 
