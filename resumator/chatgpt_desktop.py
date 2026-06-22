@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from ctypes import wintypes
 import json
 import os
 import platform
+import shutil
 import struct
 import subprocess
 import sys
@@ -176,11 +178,37 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
             r"%PUBLIC%\Desktop\Claude.lnk",
         ),
         launch_commands=(
+            ("explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"),
             (r"%LOCALAPPDATA%\AnthropicClaude\Update.exe", "--processStart", "Claude.exe"),
         ),
-        attachment_wait_seconds=3.0,
+        launch_urls=("claude://",),
+        attachment_wait_seconds=8.0,
+        require_visible_window=True,
         supports_clipboard_file_paste=False,
         supports_file_dialog_attachment=True,
+        attachment_menu_terms=(
+            "adicionar arquivos ou fotos",
+            "carregar arquivo",
+            "carregar arquivos",
+            "carregar do computador",
+            "upload file",
+            "upload files",
+            "upload from computer",
+            "upload from this device",
+            "fazer upload",
+            "enviar arquivo",
+            "enviar arquivos",
+            "selecionar arquivo",
+            "selecionar arquivos",
+            "escolher arquivo",
+            "choose file",
+            "choose files",
+            "do computador",
+            "do dispositivo",
+            "from computer",
+            "from this device",
+            "browse",
+        ),
     ),
     "gemini": DesktopAssistant(
         key="gemini",
@@ -265,7 +293,738 @@ def open_desktop_assistant(assistant_key: str) -> AutomationResult:
     except Exception as exc:  # noqa: BLE001 - opening is best-effort on selection
         notes.append(f"Nao foi possivel trazer a janela para frente: {exc}")
 
+    if assistant.key == "lmstudio":
+        prepared, lmstudio_notes, prepared_target = _prepare_lmstudio_session(target)
+        notes.extend(lmstudio_notes)
+        if prepared_target is not None:
+            target = prepared_target
+        if not prepared:
+            return AutomationResult(False, "Nao foi possivel preparar o LM Studio automaticamente.", target.title, notes)
+
     return AutomationResult(True, f"{assistant.display_name} pronto.", target.title, notes)
+
+
+def _prepare_lmstudio_session(target: AssistantTarget) -> tuple[bool, list[str], AssistantTarget | None]:
+    notes: list[str] = []
+    model_info = _latest_lmstudio_llm_model()
+
+    closed, close_note = _close_lmstudio_for_state_update(target)
+    notes.append(close_note)
+    if not closed:
+        notes.extend(_load_lmstudio_model_if_needed(model_info))
+        for note in notes:
+            _log_automation(f"LM Studio Desktop: {note}")
+        return False, notes, target
+
+    chat_created, chat_note = _create_lmstudio_new_chat(model_info)
+    notes.append(chat_note)
+    if not chat_created:
+        reopened_target, reopen_note = _open_lmstudio_after_state_update()
+        notes.append(reopen_note)
+        for note in notes:
+            _log_automation(f"LM Studio Desktop: {note}")
+        return False, notes, reopened_target or target
+
+    reopened_target, reopen_note = _open_lmstudio_after_state_update()
+    notes.append(reopen_note)
+    if reopened_target is None:
+        for note in notes:
+            _log_automation(f"LM Studio Desktop: {note}")
+        return False, notes, target
+
+    notes.extend(_load_lmstudio_model_if_needed(model_info))
+
+    for note in notes:
+        _log_automation(f"LM Studio Desktop: {note}")
+    return True, notes, reopened_target
+
+
+def _close_lmstudio_for_state_update(target: AssistantTarget) -> tuple[bool, str]:
+    assistant = ASSISTANTS["lmstudio"]
+    windows = find_assistant_windows("lmstudio")
+    processes = _find_assistant_processes(assistant)
+    if not windows and not processes:
+        return True, "LM Studio estava fechado; novo chat sera preparado antes da abertura."
+
+    handles = [hwnd for hwnd, _ in windows]
+    if target.hwnd and target.hwnd not in handles:
+        handles.append(target.hwnd)
+
+    for hwnd in handles:
+        _post_window_close(hwnd)
+
+    deadline = time.monotonic() + 12.0
+    while time.monotonic() < deadline:
+        if not find_assistant_windows("lmstudio") and not _find_assistant_processes(assistant):
+            return True, "LM Studio fechado temporariamente para preparar novo chat."
+        time.sleep(0.5)
+
+    return False, "Nao consegui fechar temporariamente o LM Studio para preparar novo chat."
+
+
+def _post_window_close(hwnd: int) -> None:
+    WM_CLOSE = 0x0010
+    try:
+        if win32gui is not None:
+            win32gui.PostMessage(hwnd, WM_CLOSE, 0, 0)
+            return
+    except Exception as exc:  # noqa: BLE001 - fallback below
+        _log_automation(f"LM Studio Desktop: falha ao enviar WM_CLOSE via pywin32: {exc!r}")
+
+    try:
+        user32 = ctypes.windll.user32
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.PostMessageW(wintypes.HWND(hwnd), WM_CLOSE, 0, 0)
+    except Exception as exc:  # noqa: BLE001 - surfaced through close timeout
+        _log_automation(f"LM Studio Desktop: falha ao enviar WM_CLOSE via ctypes: {exc!r}")
+
+
+def _open_lmstudio_after_state_update() -> tuple[AssistantTarget | None, str]:
+    assistant = ASSISTANTS["lmstudio"]
+    launched, launched_pid = _launch_assistant(assistant)
+    if not launched:
+        return None, "Nao consegui reabrir o LM Studio apos preparar novo chat."
+
+    windows = _wait_for_assistant_window(assistant, timeout_seconds=20.0)
+    if windows:
+        hwnd, title = windows[0]
+        target = AssistantTarget(hwnd=hwnd, title=title, note="LM Studio reaberto no novo chat.")
+        try:
+            _activate_assistant_target(target)
+        except Exception as exc:  # noqa: BLE001 - best-effort activation
+            _log_automation(f"LM Studio Desktop: falha ao ativar janela reaberta: {exc!r}")
+        return target, "LM Studio reaberto no novo chat."
+
+    processes = _find_assistant_processes(assistant)
+    if processes:
+        pid, name, path = processes[0]
+        return (
+            AssistantTarget(
+                hwnd=None,
+                title=Path(path).name if path else name or assistant.display_name,
+                pid=pid,
+                candidate_pids=tuple(process_pid for process_pid, _, _ in processes),
+                note="LM Studio reaberto pelo processo do Windows.",
+            ),
+            "LM Studio reaberto pelo processo do Windows.",
+        )
+
+    if launched_pid is not None:
+        return (
+            AssistantTarget(
+                hwnd=None,
+                title=assistant.display_name,
+                pid=launched_pid,
+                candidate_pids=(launched_pid,),
+                note="LM Studio reaberto automaticamente.",
+            ),
+            "LM Studio reaberto automaticamente.",
+        )
+
+    return None, "LM Studio foi acionado, mas a janela nao foi localizada."
+
+
+def _ensure_lmstudio_recent_model_loaded() -> list[str]:
+    model_info = _latest_lmstudio_llm_model()
+    notes = _load_lmstudio_model_if_needed(model_info)
+    for note in notes:
+        _log_automation(f"LM Studio Desktop: {note}")
+    return notes
+
+
+def _latest_lmstudio_llm_model() -> dict[str, object] | None:
+    available_models = _lmstudio_available_llm_models()
+    timestamp_by_identifier = _lmstudio_last_loaded_timestamps()
+
+    if available_models:
+        scored_models: list[tuple[int, dict[str, object]]] = []
+        for model in available_models:
+            timestamps = [
+                timestamp_by_identifier[identifier]
+                for identifier in _lmstudio_model_identifiers(model)
+                if identifier in timestamp_by_identifier
+            ]
+            folded_timestamps = [
+                timestamp_by_identifier[identifier.casefold()]
+                for identifier in _lmstudio_model_identifiers(model)
+                if identifier.casefold() in timestamp_by_identifier
+            ]
+            score = max([*timestamps, *folded_timestamps], default=0)
+            scored_models.append((score, model))
+
+        scored_models.sort(key=lambda item: item[0], reverse=True)
+        if scored_models[0][0] > 0:
+            return scored_models[0][1]
+        return available_models[0]
+
+    fallback_identifier = _lmstudio_fallback_last_model_identifier()
+    if fallback_identifier:
+        return {
+            "modelKey": fallback_identifier,
+            "displayName": fallback_identifier,
+            "indexedModelIdentifier": fallback_identifier,
+            "path": fallback_identifier,
+        }
+    return None
+
+
+def _lmstudio_available_llm_models() -> list[dict[str, object]]:
+    completed, detail = _run_lmstudio_cli(["ls", "--llm", "--json"], timeout_seconds=30)
+    if completed is None:
+        _log_automation(f"LM Studio Desktop: nao foi possivel listar modelos LLM: {detail}")
+        return []
+    if completed.returncode != 0:
+        _log_automation(f"LM Studio Desktop: lms ls falhou: {_compact_lmstudio_cli_output(completed)}")
+        return []
+
+    try:
+        data = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        _log_automation(f"LM Studio Desktop: lms ls retornou JSON invalido: {exc}")
+        return []
+
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("type") == "llm"]
+
+
+def _lmstudio_last_loaded_timestamps() -> dict[str, int]:
+    model_data_path = _lmstudio_internal_dir() / "model-data.json"
+    data = _read_json_file(model_data_path, {})
+    entries = data.get("json") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return {}
+
+    timestamps: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, list) or len(entry) < 2:
+            continue
+        identifier, metadata = entry[0], entry[1]
+        if not isinstance(identifier, str) or not isinstance(metadata, dict):
+            continue
+        timestamp = _as_int(metadata.get("lastLoadedTimestamp"))
+        if timestamp <= 0:
+            continue
+        timestamps[identifier] = max(timestamp, timestamps.get(identifier, 0))
+        folded = identifier.casefold()
+        timestamps[folded] = max(timestamp, timestamps.get(folded, 0))
+    return timestamps
+
+
+def _lmstudio_model_identifiers(model_info: dict[str, object]) -> set[str]:
+    identifiers: set[str] = set()
+    for key in ("modelKey", "identifier", "path", "indexedModelIdentifier", "selectedVariant"):
+        value = model_info.get(key)
+        if isinstance(value, str) and value.strip():
+            identifiers.add(value.strip())
+            if "@" in value:
+                identifiers.add(value.split("@", 1)[0].strip())
+
+    variants = model_info.get("variants")
+    if isinstance(variants, list):
+        for variant in variants:
+            if isinstance(variant, str) and variant.strip():
+                identifiers.add(variant.strip())
+                if "@" in variant:
+                    identifiers.add(variant.split("@", 1)[0].strip())
+    return identifiers
+
+
+def _lmstudio_fallback_last_model_identifier() -> str:
+    config = _read_json_file(_lmstudio_internal_dir() / "conversation-config.json", {})
+    active_conversation = config.get("selectedConversation") if isinstance(config, dict) else ""
+    template = _lmstudio_conversation_template(str(active_conversation or ""))
+    last_model = template.get("lastUsedModel") if isinstance(template, dict) else None
+    if not isinstance(last_model, dict):
+        return ""
+    identifier = last_model.get("identifier") or last_model.get("indexedModelIdentifier")
+    return str(identifier).strip() if identifier else ""
+
+
+def _create_lmstudio_new_chat(model_info: dict[str, object] | None) -> tuple[bool, str]:
+    try:
+        root = _lmstudio_root()
+        conversations_dir = root / "conversations"
+        conversations_dir.mkdir(parents=True, exist_ok=True)
+
+        config_path = _lmstudio_internal_dir() / "conversation-config.json"
+        config = _read_json_file(config_path, {})
+        active_conversation = _lmstudio_active_conversation_identifier(config)
+        conversation = _lmstudio_conversation_template(active_conversation)
+
+        now_ms = int(time.time() * 1000)
+        new_identifier = _unique_lmstudio_conversation_identifier(conversations_dir, now_ms)
+        _reset_lmstudio_conversation(conversation, now_ms, model_info)
+
+        _write_json_file(conversations_dir / new_identifier, conversation)
+        _update_lmstudio_conversation_config(config_path, config, new_identifier)
+        for state_path in _lmstudio_ui_state_paths():
+            _update_lmstudio_ui_state(state_path, new_identifier, now_ms)
+    except Exception as exc:  # noqa: BLE001 - surfaced as automation note
+        _log_automation(f"LM Studio Desktop: falha ao preparar novo chat: {exc!r}")
+        return False, f"Nao foi possivel abrir novo chat automaticamente no LM Studio: {exc}"
+
+    return True, "Novo chat do LM Studio criado."
+
+
+def _lmstudio_active_conversation_identifier(config: object) -> str:
+    if isinstance(config, dict):
+        selected = config.get("selectedConversation")
+        if isinstance(selected, str) and selected:
+            return selected
+
+    for state_path in _lmstudio_ui_state_paths():
+        state = _read_json_file(state_path, {})
+        chat = state.get("chat") if isinstance(state, dict) else None
+        if isinstance(chat, dict):
+            selected = chat.get("activeConversationIdentifier")
+            if isinstance(selected, str) and selected:
+                return selected
+    return ""
+
+
+def _lmstudio_conversation_template(active_conversation: str) -> dict[str, object]:
+    conversations_dir = _lmstudio_root() / "conversations"
+    active_path = conversations_dir / active_conversation if active_conversation else None
+    if active_path is not None and active_path.exists():
+        data = _read_json_file(active_path, {})
+        if isinstance(data, dict):
+            return copy.deepcopy(data)
+
+    try:
+        candidates = sorted(
+            conversations_dir.glob("*.conversation.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        candidates = []
+
+    for candidate in candidates:
+        data = _read_json_file(candidate, {})
+        if isinstance(data, dict):
+            return copy.deepcopy(data)
+    return {}
+
+
+def _reset_lmstudio_conversation(
+    conversation: dict[str, object],
+    now_ms: int,
+    model_info: dict[str, object] | None,
+) -> None:
+    conversation.update(
+        {
+            "name": "Novo chat Resumator 10",
+            "pinned": False,
+            "createdAt": now_ms,
+            "tokenCount": 0,
+            "userLastMessagedAt": 0,
+            "assistantLastMessagedAt": 0,
+            "messages": [],
+            "clientInput": "",
+            "clientInputFiles": [],
+            "userFilesSizeBytes": 0,
+            "notes": [],
+            "looseFiles": [],
+        }
+    )
+    conversation.setdefault("preset", "")
+    conversation.setdefault("systemPrompt", "")
+    conversation.setdefault("usePerChatPredictionConfig", True)
+    conversation.setdefault("perChatPredictionConfig", {"fields": []})
+    conversation.setdefault("plugins", [])
+    conversation.setdefault("pluginConfigs", {})
+    conversation.setdefault("disabledPluginTools", [])
+    _apply_lmstudio_model_to_conversation(conversation, model_info)
+
+
+def _apply_lmstudio_model_to_conversation(
+    conversation: dict[str, object],
+    model_info: dict[str, object] | None,
+) -> None:
+    if model_info is None:
+        return
+    model_key = _lmstudio_model_key(model_info)
+    if not model_key:
+        return
+
+    indexed_identifier = str(
+        model_info.get("indexedModelIdentifier")
+        or model_info.get("path")
+        or model_key
+    ).strip()
+    last_used_model = conversation.get("lastUsedModel")
+    if not isinstance(last_used_model, dict):
+        last_used_model = {
+            "instanceLoadTimeConfig": {"fields": []},
+            "instanceOperationTimeConfig": {"fields": []},
+        }
+        conversation["lastUsedModel"] = last_used_model
+
+    last_used_model["identifier"] = model_key
+    last_used_model["indexedModelIdentifier"] = indexed_identifier or model_key
+
+
+def _unique_lmstudio_conversation_identifier(conversations_dir: Path, now_ms: int) -> str:
+    candidate_ms = now_ms
+    while True:
+        identifier = f"{candidate_ms}.conversation.json"
+        if not (conversations_dir / identifier).exists():
+            return identifier
+        candidate_ms += 1
+
+
+def _update_lmstudio_conversation_config(config_path: Path, config: object, conversation_id: str) -> None:
+    if not isinstance(config, dict):
+        config = {}
+
+    history = config.get("selectedConversationHistory")
+    if not isinstance(history, list):
+        history = []
+    history = [item for item in history if isinstance(item, str)]
+    history.append(conversation_id)
+
+    config["selectedConversation"] = conversation_id
+    config["newChatConversationIdentifier"] = None
+    config["selectedConversationHistory"] = history
+    config["selectedConversationHistoryIndex"] = len(history) - 1
+    _write_json_file(config_path, config)
+
+
+def _update_lmstudio_ui_state(state_path: Path, conversation_id: str, now_ms: int) -> None:
+    state = _read_json_file(state_path, {})
+    if not isinstance(state, dict):
+        state = {}
+
+    chat = _ensure_dict(state, "chat")
+    chat["activeConversationIdentifier"] = conversation_id
+    chat["pluginsPopoverChatIdentifier"] = None
+    chat["pluginsPopoverIsOpen"] = False
+
+    tab_layouts = _ensure_dict(state, "tabLayouts")
+    chat_layout = _ensure_dict(tab_layouts, "chat")
+    chat_layout["type"] = "pane"
+    chat_layout["id"] = chat_layout.get("id") or "root"
+    chat_layout["instanceId"] = chat_layout.get("instanceId") or "root"
+    chat_layout["tabs"] = [f"conversation:{conversation_id}"]
+    chat_layout["tabInstanceIds"] = [f"tab-resumator-{now_ms}"]
+    chat_layout["active"] = 0
+    chat_layout["previewIndex"] = None
+    state["latestPath"] = "/chat"
+
+    _write_json_file(state_path, state)
+
+
+def _load_lmstudio_model_if_needed(model_info: dict[str, object] | None) -> list[str]:
+    if model_info is None:
+        return ["Nao encontrei modelo LLM recente para carregar no LM Studio."]
+
+    model_key = _lmstudio_model_key(model_info)
+    if not model_key:
+        return ["Nao encontrei identificador valido do modelo LLM recente no LM Studio."]
+
+    model_name = _lmstudio_model_display_name(model_info)
+    if _lmstudio_model_is_loaded(model_info):
+        return [f"Modelo recente ja estava carregado no LM Studio: {model_name}."]
+
+    last_detail = ""
+    for attempt in range(2):
+        completed, detail = _run_lmstudio_cli(["load", model_key, "-y"], timeout_seconds=240)
+        if completed is not None and completed.returncode == 0:
+            return [f"Modelo recente carregado no LM Studio: {model_name}."]
+        last_detail = detail if completed is None else _compact_lmstudio_cli_output(completed)
+        if attempt == 0:
+            time.sleep(2.0)
+
+    return [f"Nao foi possivel carregar automaticamente o modelo recente ({model_name}): {last_detail}"]
+
+
+def _lmstudio_model_is_loaded(model_info: dict[str, object]) -> bool:
+    completed, _ = _run_lmstudio_cli(["ps", "--json"], timeout_seconds=15)
+    if completed is None or completed.returncode != 0:
+        return False
+
+    try:
+        loaded_models = json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(loaded_models, list):
+        return False
+
+    wanted_identifiers = _lmstudio_model_identifiers(model_info)
+    wanted_folded = {identifier.casefold() for identifier in wanted_identifiers}
+    for loaded in loaded_models:
+        if not isinstance(loaded, dict):
+            continue
+        loaded_identifiers = _lmstudio_model_identifiers(loaded)
+        loaded_folded = {identifier.casefold() for identifier in loaded_identifiers}
+        if wanted_identifiers.intersection(loaded_identifiers) or wanted_folded.intersection(loaded_folded):
+            return True
+    return False
+
+
+def _lmstudio_model_key(model_info: dict[str, object]) -> str:
+    for key in ("modelKey", "identifier", "path", "indexedModelIdentifier"):
+        value = model_info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _lmstudio_model_display_name(model_info: dict[str, object]) -> str:
+    for key in ("displayName", "modelKey", "identifier", "path", "indexedModelIdentifier"):
+        value = model_info.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "modelo LLM recente"
+
+
+def _run_lmstudio_cli(
+    args: list[str],
+    timeout_seconds: float,
+) -> tuple[subprocess.CompletedProcess[str] | None, str]:
+    cli_path = _lmstudio_cli_path()
+    if cli_path is None:
+        return None, "lms.exe nao encontrado."
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            [str(cli_path), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            creationflags=creationflags,
+            timeout=timeout_seconds,
+        )
+        return completed, ""
+    except subprocess.TimeoutExpired:
+        return None, f"tempo esgotado ao executar lms {' '.join(args)}."
+    except Exception as exc:  # noqa: BLE001 - surfaced as automation note
+        return None, str(exc)
+
+
+def _lmstudio_cli_path() -> Path | None:
+    executable_name = "lms.exe" if os.name == "nt" else "lms"
+    candidates = [
+        Path.home() / ".lmstudio" / "bin" / executable_name,
+        Path(os.path.expandvars(r"%USERPROFILE%\.lmstudio\bin")) / executable_name,
+    ]
+
+    found = shutil.which(executable_name) or shutil.which("lms")
+    if found:
+        candidates.append(Path(found))
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _compact_lmstudio_cli_output(completed: subprocess.CompletedProcess[str]) -> str:
+    detail = " ".join(part.strip() for part in (completed.stderr, completed.stdout) if part and part.strip())
+    if not detail:
+        detail = f"codigo de saida {completed.returncode}"
+    detail = " ".join(detail.split())
+    return detail[:400]
+
+
+def _lmstudio_root() -> Path:
+    return Path.home() / ".lmstudio"
+
+
+def _lmstudio_internal_dir() -> Path:
+    return _lmstudio_root() / ".internal"
+
+
+def _lmstudio_ui_state_paths() -> list[Path]:
+    ui_state_dir = _lmstudio_internal_dir() / "ui-state"
+    try:
+        paths = sorted(ui_state_dir.glob("window-*.json"))
+    except OSError:
+        paths = []
+    return paths or [ui_state_dir / "window-1.json"]
+
+
+def _read_json_file(path: Path, default: object) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return copy.deepcopy(default)
+
+
+def _write_json_file(path: Path, data: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.resumator-tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _ensure_dict(data: dict[str, object], key: str) -> dict[str, object]:
+    value = data.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        data[key] = value
+    return value
+
+
+def _as_int(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def _capture_lmstudio_latest_response_from_disk() -> tuple[str, list[str]]:
+    conversation_paths = _lmstudio_conversation_capture_candidates()
+    if not conversation_paths:
+        return "", ["Nao encontrei conversas locais do LM Studio para capturar a resposta."]
+
+    for conversation_path in conversation_paths:
+        conversation = _read_json_file(conversation_path, {})
+        text = _extract_lmstudio_latest_assistant_text(conversation)
+        if text:
+            return text, [f"Resposta lida da conversa local do LM Studio: {conversation_path.name}."]
+
+    return "", ["Nao encontrei uma mensagem final do assistente nas conversas locais do LM Studio."]
+
+
+def _lmstudio_conversation_capture_candidates() -> list[Path]:
+    conversations_dir = _lmstudio_root() / "conversations"
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def add_candidate(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen or not path.exists():
+            return
+        seen.add(resolved)
+        candidates.append(path)
+
+    config = _read_json_file(_lmstudio_internal_dir() / "conversation-config.json", {})
+    active_conversation = _lmstudio_active_conversation_identifier(config)
+    if active_conversation:
+        add_candidate(conversations_dir / active_conversation)
+
+    for state_path in _lmstudio_ui_state_paths():
+        state = _read_json_file(state_path, {})
+        chat = state.get("chat") if isinstance(state, dict) else None
+        if isinstance(chat, dict):
+            active = chat.get("activeConversationIdentifier")
+            if isinstance(active, str) and active:
+                add_candidate(conversations_dir / active)
+
+    try:
+        newest = sorted(
+            conversations_dir.glob("*.conversation.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        newest = []
+
+    for path in newest[:8]:
+        add_candidate(path)
+
+    return candidates
+
+
+def _extract_lmstudio_latest_assistant_text(conversation: object) -> str:
+    if not isinstance(conversation, dict):
+        return ""
+    messages = conversation.get("messages")
+    if not isinstance(messages, list):
+        return ""
+
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        version = _lmstudio_selected_message_version(message)
+        if not isinstance(version, dict):
+            continue
+        role = version.get("role") or message.get("role")
+        if str(role or "").casefold() != "assistant":
+            continue
+        text = _lmstudio_assistant_version_text(version)
+        if text:
+            return text
+    return ""
+
+
+def _lmstudio_selected_message_version(message: dict[str, object]) -> object:
+    versions = message.get("versions")
+    if not isinstance(versions, list) or not versions:
+        return message
+
+    selected = message.get("currentlySelected")
+    if isinstance(selected, int) and 0 <= selected < len(versions):
+        return versions[selected]
+    return versions[-1]
+
+
+def _lmstudio_assistant_version_text(version: dict[str, object]) -> str:
+    direct_text = _lmstudio_content_text(version.get("content"))
+    if direct_text:
+        return direct_text
+
+    steps = version.get("steps")
+    if not isinstance(steps, list):
+        return ""
+
+    fallback_text = ""
+    for step in reversed(steps):
+        if not isinstance(step, dict) or _lmstudio_step_is_non_response(step):
+            continue
+        text = _lmstudio_content_text(step.get("content"))
+        if not text:
+            continue
+        if isinstance(step.get("genInfo"), dict):
+            return text
+        if not fallback_text:
+            fallback_text = text
+    return fallback_text
+
+
+def _lmstudio_step_is_non_response(step: dict[str, object]) -> bool:
+    step_type = str(step.get("type") or "").casefold()
+    if step_type in {"debuginfoblock", "status"}:
+        return True
+
+    prefix = str(step.get("prefix") or "").casefold()
+    if "thought" in prefix:
+        return True
+
+    style = step.get("style")
+    if isinstance(style, dict):
+        style_type = str(style.get("type") or "").casefold()
+        title = str(style.get("title") or "").casefold()
+        if style_type == "thinking" or "thought" in title:
+            return True
+    return False
+
+
+def _lmstudio_content_text(content: object) -> str:
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = [_lmstudio_content_text(item) for item in content]
+        return "\n".join(part for part in parts if part).strip()
+
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str):
+            return text.strip()
+        nested = content.get("content")
+        if nested is not None:
+            return _lmstudio_content_text(nested)
+    return ""
 
 
 def find_chatgpt_windows() -> list[tuple[int, str]]:
@@ -340,14 +1099,18 @@ def _find_assistant_windows_ctypes(assistant: DesktopAssistant) -> list[tuple[in
 
 def _matches_assistant_window(title: str, process_text: str, assistant: DesktopAssistant) -> bool:
     title_folded = title.casefold()
-    if title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords):
-        return True
-
     process_folded = process_text.casefold()
-    return bool(
+    process_matches = bool(
         process_text
         and any(keyword.casefold() in process_folded for keyword in assistant.process_keywords)
     )
+    if assistant.key in {"claude", "lmstudio"}:
+        return process_matches
+
+    if title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords):
+        return True
+
+    return process_matches
 
 
 def _window_fallback_title(process_text: str, assistant: DesktopAssistant) -> str:
@@ -698,6 +1461,9 @@ def send_to_desktop_assistant(
         _activate_assistant_target(target)
         time.sleep(0.6)
 
+        if assistant.key == "lmstudio":
+            notes.extend(_ensure_lmstudio_recent_model_loaded())
+
         pdf_paths = _normalize_pdf_paths(pdf_path)
         prompt_document_paths = _normalize_paths(prompt_document_path)
         attachment_paths = [*prompt_document_paths]
@@ -748,6 +1514,18 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
 
     if not IS_WINDOWS:
         return AutomationResult(False, f"A automação do {assistant.display_name} só está disponível no Windows.")
+
+    if assistant.key == "lmstudio":
+        text, notes = _capture_lmstudio_latest_response_from_disk()
+        if text:
+            _log_automation(f"{assistant.display_name}: resposta capturada pelo arquivo de conversa local.")
+            return AutomationResult(
+                True,
+                f"Resposta capturada do {assistant.display_name}.",
+                assistant.display_name,
+                notes,
+                text,
+            )
 
     target = _resolve_assistant_target(assistant)
     if target is None:
@@ -1534,6 +2312,12 @@ def _attach_files_to_assistant(
 def _open_attachment_dialog(assistant: DesktopAssistant, target: AssistantTarget) -> bool:
     hwnd = target.hwnd or _foreground_window_handle()
     if hwnd:
+        if assistant.key == "claude":
+            _hotkey("ctrl", "u")
+            _log_automation(f"{assistant.display_name}: tentativa de acionar anexo por atalho Ctrl+U")
+            if _wait_for_file_dialog(timeout_seconds=3.0):
+                return True
+
         invoked, detail = _invoke_uia_action(hwnd, assistant.attachment_button_terms, "controle de anexo")
         _log_automation(f"{assistant.display_name}: tentativa de acionar botao de anexo: {detail}")
         if invoked and _wait_for_file_dialog(timeout_seconds=3.0):
@@ -2015,6 +2799,7 @@ VK = {
     "alt": 0x12,
     "v": 0x56,
     "c": 0x43,
+    "u": 0x55,
     "a": 0x41,
     "enter": 0x0D,
 }

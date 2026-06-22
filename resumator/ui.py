@@ -34,6 +34,7 @@ MAX_PDF_FILES = 10
 DELIVERY_TEXT = "text"
 DELIVERY_DOCX = "docx"
 ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS = 10
+LMSTUDIO_SELECTION_MOUSE_SUSPEND_SECONDS = 30
 SEND_MOUSE_SUSPEND_SECONDS = 15
 WH_MOUSE_LL = 14
 HC_ACTION = 0
@@ -254,12 +255,13 @@ class ResumatorApp:
 
         entry = ttk.Entry(frame, textvariable=self.pdf_var, state="readonly")
         entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(frame, text="Selecionar PDFs", command=self._select_pdf).grid(row=0, column=1)
+        ttk.Button(frame, text="Adicionar PDFs", command=self._select_pdf).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(frame, text="Limpar PDFs", command=self._clear_pdf_selection).grid(row=0, column=2)
 
     def _build_automation_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Envio à IA", padding=12)
         frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        frame.columnconfigure(8, weight=1)
+        frame.columnconfigure(7, weight=1)
 
         ttk.Label(frame, text="Destino:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Radiobutton(
@@ -285,32 +287,25 @@ class ResumatorApp:
         ).grid(row=0, column=3, sticky="w", padx=(0, 12))
         ttk.Radiobutton(
             frame,
-            text="Claude Desktop",
-            variable=self.assistant_var,
-            value="claude",
-            command=self._on_assistant_selected,
-        ).grid(row=0, column=4, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
-            frame,
             text="Google Gemini",
             variable=self.assistant_var,
             value="gemini",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=5, sticky="w", padx=(0, 12))
+        ).grid(row=0, column=4, sticky="w", padx=(0, 12))
         ttk.Radiobutton(
             frame,
             text="LM Studio Desktop",
             variable=self.assistant_var,
             value="lmstudio_desktop",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=6, sticky="w", padx=(0, 12))
+        ).grid(row=0, column=5, sticky="w", padx=(0, 12))
         ttk.Radiobutton(
             frame,
             text="Jus IA",
             variable=self.assistant_var,
             value="jusia",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=7, sticky="w", padx=(0, 12))
+        ).grid(row=0, column=6, sticky="w", padx=(0, 12))
 
         ttk.Label(frame, text="Envio:").grid(row=1, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
         self.delivery_text_radio = ttk.Radiobutton(
@@ -496,6 +491,9 @@ class ResumatorApp:
         elif assistant_key == "copilot":
             self.delivery_mode_var.set(DELIVERY_DOCX)
             text_state = "disabled"
+        elif assistant_key == "lmstudio_desktop":
+            self.delivery_mode_var.set(DELIVERY_TEXT)
+            docx_state = "disabled"
         self.delivery_text_radio.configure(state=text_state)
         self.delivery_docx_radio.configure(state=docx_state)
 
@@ -510,13 +508,18 @@ class ResumatorApp:
             return
 
         assistant_name = assistant_display_name(assistant_key)
-        self._begin_mouse_suspend(ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS)
+        suspend_seconds = (
+            LMSTUDIO_SELECTION_MOUSE_SUSPEND_SECONDS
+            if assistant_key == "lmstudio"
+            else ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS
+        )
+        self._begin_mouse_suspend(suspend_seconds)
         self._set_status(f"Abrindo {assistant_name}...")
         threading.Thread(target=self._open_assistant_worker, args=(assistant_key,), daemon=True).start()
 
     @staticmethod
     def _desktop_assistant_key(assistant_key: str) -> str | None:
-        if assistant_key in {"chatgpt", "copilot", "claude", "gemini", "jusia"}:
+        if assistant_key in {"chatgpt", "copilot", "gemini", "jusia"}:
             return assistant_key
         if assistant_key == "lmstudio_desktop":
             return "lmstudio"
@@ -712,12 +715,33 @@ class ResumatorApp:
         )
         if not selected:
             return
-        if len(selected) > MAX_PDF_FILES:
-            messagebox.showwarning(APP_TITLE, f"Selecione no máximo {MAX_PDF_FILES} arquivos PDF.")
+
+        previous_paths = _deduplicate_paths(self.pdf_paths)
+        selected_paths = [Path(path) for path in selected]
+        combined_paths = _deduplicate_paths([*previous_paths, *selected_paths])
+
+        if len(combined_paths) > MAX_PDF_FILES:
+            messagebox.showwarning(
+                APP_TITLE,
+                (
+                    f"A seleção total ficaria com {len(combined_paths)} PDFs. "
+                    f"Selecione no máximo {MAX_PDF_FILES} arquivos PDF."
+                ),
+            )
             return
-        self.pdf_paths = [Path(path) for path in selected]
+
+        added_count = len(combined_paths) - len(previous_paths)
+        self.pdf_paths = combined_paths
         self.pdf_var.set(_format_pdf_selection(self.pdf_paths))
-        self._set_status(f"{len(self.pdf_paths)} PDF(s) selecionado(s).")
+        if added_count:
+            self._set_status(f"{len(self.pdf_paths)} PDF(s) selecionado(s). {added_count} adicionado(s).")
+        else:
+            self._set_status(f"{len(self.pdf_paths)} PDF(s) selecionado(s). Arquivos ja estavam na lista.")
+
+    def _clear_pdf_selection(self) -> None:
+        self.pdf_paths = []
+        self.pdf_var.set("")
+        self._set_status("Seleção de PDFs limpa.")
 
     def _send_to_assistant(self) -> None:
         prompt = self._selected_prompt()
@@ -734,9 +758,6 @@ class ResumatorApp:
             return
         if assistant_key == "lmstudio_desktop":
             assistant_name = "LM Studio Desktop"
-            if not self._confirm_lmstudio_model_selected():
-                self._set_status("Envio ao LM Studio aguardando escolha do modelo.")
-                return
         else:
             assistant_name = assistant_display_name(assistant_key)
         delivery_mode = self._effective_delivery_mode(assistant_key)
@@ -772,6 +793,8 @@ class ResumatorApp:
     def _effective_delivery_mode(self, assistant_key: str) -> str:
         if assistant_key == "copilot":
             return DELIVERY_DOCX
+        if assistant_key == "lmstudio_desktop":
+            return DELIVERY_TEXT
         mode = self.delivery_mode_var.get()
         if mode not in {DELIVERY_TEXT, DELIVERY_DOCX}:
             return DELIVERY_TEXT
@@ -789,17 +812,6 @@ class ResumatorApp:
             prompt.content,
             prompt_name=prompt.name,
             source_pdf=pdf_paths,
-        )
-
-    def _confirm_lmstudio_model_selected(self) -> bool:
-        return messagebox.askokcancel(
-            "LM Studio Desktop",
-            (
-                "Antes de enviar ao LM Studio Desktop, escolha o modelo de IA "
-                "(Gemma, Qwen, GPT, llama, etc.) no LM Studio.\n\n"
-                "Clique em OK apenas depois de escolher o modelo."
-            ),
-            icon="warning",
         )
 
     def _confirm_local_automation(self, assistant_name: str, delivery_mode: str) -> bool:
@@ -1266,6 +1278,27 @@ def _format_pdf_selection(paths: list[Path]) -> str:
         return str(paths[0])
     names = ", ".join(path.name for path in paths)
     return f"{len(paths)} PDFs selecionados: {names}"
+
+
+def _deduplicate_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    unique_paths: list[Path] = []
+    for path in paths:
+        key = _path_selection_key(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_paths.append(path)
+    return unique_paths
+
+
+def _path_selection_key(path: Path) -> str:
+    try:
+        normalized = path.resolve()
+    except OSError:
+        normalized = path.absolute()
+    text = str(normalized)
+    return text.casefold() if os.name == "nt" else text
 
 
 def _readme_txt_path() -> Path | None:
