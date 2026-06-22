@@ -2,6 +2,10 @@
 
 Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs para assistentes de IA, capturar a resposta e exportar em PDF, DOCX, JSON ou diretamente para o QUIMERA.
 
+## Download
+
+Baixe o instalador Windows em [`downloads/Resumator_10_Setup.exe`](downloads/Resumator_10_Setup.exe).
+
 ## Assistente de Prompt
 
 O botao "Assistente" abre uma janela grande com alternativas de escolha unica para:
