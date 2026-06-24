@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,7 +29,7 @@ APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
 DATA_DIR = APP_DIR / "data"
 PROMPTS_PATH = DATA_DIR / "prompts.json"
 OUTPUT_DIR = APP_DIR / "saidas"
-APP_TITLE = "Resumator 10"
+APP_TITLE = "Resumator 10.1"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 MAX_PDF_FILES = 10
 DELIVERY_TEXT = "text"
@@ -95,7 +96,7 @@ def _initialize_tcl_runtime() -> None:
 _initialize_tcl_runtime()
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 
@@ -142,6 +143,7 @@ class ResumatorApp:
 
         self.prompt_var = tk.StringVar()
         self.pdf_var = tk.StringVar()
+        self.process_number_var = tk.StringVar()
         self.assistant_var = tk.StringVar(value="none")
         self.delivery_mode_var = tk.StringVar(value=DELIVERY_TEXT)
         self.status_var = tk.StringVar(value="Pronto.")
@@ -255,8 +257,17 @@ class ResumatorApp:
 
         entry = ttk.Entry(frame, textvariable=self.pdf_var, state="readonly")
         entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(frame, text="Adicionar PDFs", command=self._select_pdf).grid(row=0, column=1, padx=(0, 6))
+        self.add_pdf_button = ttk.Button(frame, text="Adicionar PDFs", command=self._select_pdf)
+        self.add_pdf_button.grid(row=0, column=1, padx=(0, 6))
         ttk.Button(frame, text="Limpar PDFs", command=self._clear_pdf_selection).grid(row=0, column=2)
+
+        process_frame = ttk.Frame(frame)
+        process_frame.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        process_frame.columnconfigure(1, weight=1)
+        ttk.Label(process_frame, text="Nº do processo administrativo/judicial").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Entry(process_frame, textvariable=self.process_number_var).grid(row=0, column=1, sticky="ew")
 
     def _build_automation_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Envio à IA", padding=12)
@@ -466,6 +477,7 @@ class ResumatorApp:
     def _refresh_send_button(self) -> None:
         assistant_key = self.assistant_var.get()
         self._refresh_delivery_controls(assistant_key)
+        self._refresh_pdf_controls(assistant_key)
         if assistant_key == "none":
             self.send_button.configure(text="Escolha um destino", state="disabled")
             self.attach_check.configure(state="disabled")
@@ -489,13 +501,20 @@ class ResumatorApp:
             text_state = "disabled"
             docx_state = "disabled"
         elif assistant_key == "copilot":
-            self.delivery_mode_var.set(DELIVERY_DOCX)
-            text_state = "disabled"
+            self.delivery_mode_var.set(DELIVERY_TEXT)
+            docx_state = "disabled"
         elif assistant_key == "lmstudio_desktop":
             self.delivery_mode_var.set(DELIVERY_TEXT)
             docx_state = "disabled"
         self.delivery_text_radio.configure(state=text_state)
         self.delivery_docx_radio.configure(state=docx_state)
+
+    def _refresh_pdf_controls(self, assistant_key: str | None = None) -> None:
+        add_pdf_button = getattr(self, "add_pdf_button", None)
+        if add_pdf_button is None:
+            return
+        selected_assistant = assistant_key if assistant_key is not None else self.assistant_var.get()
+        add_pdf_button.configure(state="normal" if selected_assistant == "none" else "disabled")
 
     def _on_delivery_mode_selected(self) -> None:
         self._refresh_send_button()
@@ -654,7 +673,7 @@ class ResumatorApp:
         self._set_status(f"Prompts importados: {total_imported}. Ignorados: {total_skipped}.")
 
     def _export_user_prompts(self) -> None:
-        default_name = f"prompts-resumator-10-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        default_name = f"prompts-resumator-10.1-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Exportar prompts criados pelo usuário",
             defaultextension=".json",
@@ -709,6 +728,14 @@ class ResumatorApp:
         return paths[0] if paths else None
 
     def _select_pdf(self) -> None:
+        if self.assistant_var.get() != "none":
+            messagebox.showwarning(
+                APP_TITLE,
+                "Para adicionar PDFs, selecione 'Nenhum' no destino de IA.",
+            )
+            self._set_status("Adição de PDFs bloqueada após a escolha da IA.")
+            return
+
         selected = filedialog.askopenfilenames(
             title="Selecionar até 10 PDFs",
             filetypes=[("Arquivos PDF", "*.pdf"), ("Todos os arquivos", "*.*")],
@@ -792,7 +819,7 @@ class ResumatorApp:
 
     def _effective_delivery_mode(self, assistant_key: str) -> str:
         if assistant_key == "copilot":
-            return DELIVERY_DOCX
+            return DELIVERY_TEXT
         if assistant_key == "lmstudio_desktop":
             return DELIVERY_TEXT
         mode = self.delivery_mode_var.get()
@@ -801,10 +828,10 @@ class ResumatorApp:
         return mode
 
     def _create_prompt_document(self, prompt: Prompt, pdf_paths: list[Path]) -> Path:
-        output_dir = Path(tempfile.gettempdir()) / "resumator-10-envios"
+        output_dir = Path(tempfile.gettempdir()) / "resumator-10.1-envios"
         output_path = _unique_output_path(
             output_dir,
-            f"prompt-ia-resumator-10-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            f"prompt-ia-resumator-10.1-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             ".docx",
         )
         return export_prompt_docx(
@@ -830,7 +857,7 @@ class ResumatorApp:
         return messagebox.askyesno(
             "Autorizar automacao local",
             (
-                f"O Resumator 10 vai ativar o {assistant_name}, {attach_action}, "
+                f"{APP_TITLE} vai ativar o {assistant_name}, {attach_action}, "
                 f"{delivery_action} e {submit_action}.\n\n"
                 "PDFs autorizados nesta acao:\n"
                 f"{pdf_list}\n\n"
@@ -921,7 +948,7 @@ class ResumatorApp:
         confirmed = messagebox.askyesno(
             "Autorizar captura automática",
             (
-                f"O Resumator 10 vai ativar o {assistant_name}, procurar o botao de copiar "
+                f"{APP_TITLE} vai ativar o {assistant_name}, procurar o botao de copiar "
                 "resposta, aciona-lo e preencher o campo Resposta com o texto copiado.\n\n"
                 "Continuar?"
             ),
@@ -981,30 +1008,16 @@ class ResumatorApp:
             return
 
         prompt = self._selected_prompt()
+        export_stem = self._export_stem_from_process_number()
+        if export_stem is None:
+            return
+
         if output_format == "json":
             extension = ".json"
             file_label = "JSON"
-            output_path = _unique_output_path(
-                _desktop_dir(),
-                f"resumo-peticao-inicial-resumator-10-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-                extension,
-            )
-            try:
-                self.last_output_path = export_response_json(
-                    output_path,
-                    text,
-                    prompt_name=prompt.name if prompt else None,
-                    source_pdf=list(self.pdf_paths),
-                )
-            except Exception as exc:  # noqa: BLE001 - surfaced to user
-                write_exception(f"Falha ao exportar {file_label}", exc)
-                messagebox.showerror(APP_TITLE, f"Não foi possível gerar o arquivo {file_label}: {exc}")
-                return
-            self._set_status(f"{file_label} gerado na Área de Trabalho: {self.last_output_path}")
-            messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label} na Área de Trabalho.")
-            return
-
-        if output_format == "docx":
+            filetypes = [("Arquivos JSON", "*.json")]
+            exporter = export_response_json
+        elif output_format == "docx":
             extension = ".docx"
             file_label = "DOCX"
             filetypes = [("Documentos Word", "*.docx")]
@@ -1015,7 +1028,7 @@ class ResumatorApp:
             filetypes = [("Arquivos PDF", "*.pdf")]
             exporter = export_response_pdf
 
-        default_name = f"resposta-resumator-10{extension}"
+        default_name = f"{export_stem}{extension}"
         path = filedialog.asksaveasfilename(
             title=f"Salvar resposta em {file_label}",
             defaultextension=extension,
@@ -1025,9 +1038,18 @@ class ResumatorApp:
         )
         if not path:
             return
+        output_path = _enforce_export_filename(Path(path), default_name)
+        selected_path = Path(path)
+        if output_path != selected_path and output_path.exists():
+            replace = messagebox.askyesno(
+                APP_TITLE,
+                f"O arquivo {output_path.name} já existe em {output_path.parent}. Deseja substituir?",
+            )
+            if not replace:
+                return
         try:
             self.last_output_path = exporter(
-                Path(path),
+                output_path,
                 text,
                 prompt_name=prompt.name if prompt else None,
                 source_pdf=list(self.pdf_paths),
@@ -1038,6 +1060,34 @@ class ResumatorApp:
             return
         self._set_status(f"{file_label} gerado: {self.last_output_path}")
         messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label}.")
+
+    def _export_stem_from_process_number(self) -> str | None:
+        process_number = self.process_number_var.get().strip()
+        if not process_number:
+            process_number = simpledialog.askstring(
+                APP_TITLE,
+                "Informe o número do processo administrativo ou judicial para nomear o arquivo exportado.",
+                parent=self.root,
+            )
+            if process_number is None:
+                return None
+            process_number = process_number.strip()
+            if not process_number:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "Informe o número do processo administrativo ou judicial antes de exportar.",
+                )
+                return None
+            self.process_number_var.set(process_number)
+
+        safe_process_number = _sanitize_process_number_for_filename(process_number)
+        if not safe_process_number:
+            messagebox.showwarning(
+                APP_TITLE,
+                "O número do processo informado não gera um nome de arquivo válido.",
+            )
+            return None
+        return f"Resumator-{safe_process_number}"
 
     def _export_to_solicitador(self) -> None:
         text = self.response_text.get("1.0", "end").strip()
@@ -1077,7 +1127,7 @@ class ResumatorApp:
             return
 
     def _export_logs_txt(self) -> None:
-        default_name = f"logs-resumator-10-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        default_name = f"logs-resumator-10.1-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         path = filedialog.asksaveasfilename(
             title="Salvar logs em TXT",
             defaultextension=".txt",
@@ -1269,6 +1319,17 @@ def _unique_output_path(directory: Path, stem: str, extension: str) -> Path:
         candidate = directory / f"{stem}-{counter}{extension}"
         counter += 1
     return candidate
+
+
+def _sanitize_process_number_for_filename(process_number: str) -> str:
+    cleaned = " ".join(process_number.strip().split())
+    cleaned = cleaned.translate(str.maketrans({char: "-" for char in '<>:"/\\|?*'}))
+    cleaned = re.sub(r"[-\s]+", "-", cleaned)
+    return cleaned.strip(" .-")
+
+
+def _enforce_export_filename(selected_path: Path, filename: str) -> Path:
+    return selected_path.parent / filename
 
 
 def _format_pdf_selection(paths: list[Path]) -> str:

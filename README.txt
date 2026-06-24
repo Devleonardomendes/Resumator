@@ -1,7 +1,16 @@
-Resumator 10
-============
+Resumator 10.1
+==============
 
 Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs para assistentes de IA, capturar a resposta e exportar em PDF, DOCX, JSON ou diretamente para o QUIMERA.
+
+Download
+--------
+
+Baixe o instalador Windows em downloads\Resumator_10.1_Setup.exe.
+
+Tutorial de excecao no Windows: TUTORIAL_EXCECAO_FIREWALL_WINDOWS.txt.
+
+Versao atualizada em 24/06/2026 com bloqueio de novos PDFs apos a escolha da IA, nome de exportacao baseado no numero do processo e instalador da versao 10.1.
 
 Assistente de Prompt
 --------------------
@@ -51,7 +60,7 @@ O botao "Assistente" abre uma janela grande com alternativas de escolha unica pa
 Uso basico
 ----------
 
-1. Abra o Resumator 10.
+1. Abra o Resumator 10.1.
 2. Crie um prompt em "Personalizado", importe prompts ou use o "Assistente".
 3. Selecione de 1 a 10 PDFs.
 4. Escolha o destino de IA.
@@ -67,14 +76,16 @@ A automacao atua somente nos destinos cadastrados: ChatGPT Desktop, Microsoft 36
 
 No modo "Texto colado", o prompt e colado no campo de mensagem e os PDFs sao anexados conforme a opcao selecionada.
 
-No modo "Documento DOCX", o Resumator cria um DOCX temporario com o prompt e anexa esse arquivo junto dos PDFs. No Copilot, este e o unico modo permitido.
+No modo "Documento DOCX", o Resumator cria um DOCX temporario com o prompt e anexa esse arquivo junto dos PDFs.
+
+No Microsoft 365 Copilot, o Resumator 10.1 sempre abre um novo chat por solicitacao, cola o prompt como texto e anexa apenas os PDFs selecionados. Se o seletor de arquivos nao for confirmado, o envio fica pausado para conferencia.
 
 Copilot, Gemini e Claude podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta colar os arquivos como anexos e mantem o envio pausado para conferencia.
 
 Integracao com QUIMERA
 ----------------------
 
-O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 10. A exportacao manual em JSON continua disponivel como alternativa.
+O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 10.1. A exportacao manual em JSON continua disponivel como alternativa.
 
 Arquivos principais
 -------------------
@@ -90,7 +101,7 @@ Build
 
 Aplicativo:
 
-python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 10.spec"
+python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 10.1.spec"
 
 Instalador:
 
@@ -98,5 +109,5 @@ powershell -ExecutionPolicy Bypass -File installer\build_setup.ps1
 
 Artefatos esperados:
 
-- dist-py314\Resumator 10\Resumator 10.exe
-- dist-py314\Resumator 10 Setup.exe
+- dist-py314\Resumator 10.1\Resumator 10.1.exe
+- dist-py314\Resumator 10.1 Setup.exe

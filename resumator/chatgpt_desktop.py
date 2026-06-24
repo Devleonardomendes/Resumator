@@ -73,6 +73,7 @@ class DesktopAssistant:
     supports_clipboard_file_paste: bool = True
     supports_file_dialog_attachment: bool = False
     trust_clipboard_attachment_fallback: bool = False
+    force_new_chat_before_send: bool = False
     attachment_button_terms: tuple[str, ...] = (
         "anexar",
         "anexo",
@@ -161,7 +162,33 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         require_visible_window=True,
         supports_clipboard_file_paste=False,
         supports_file_dialog_attachment=True,
-        trust_clipboard_attachment_fallback=True,
+        trust_clipboard_attachment_fallback=False,
+        force_new_chat_before_send=True,
+        attachment_button_terms=(
+            "adicionar e gerenciar fontes",
+            "gerenciar fontes",
+            "adicionar conteúdo",
+            "adicionar conteudo",
+            "add content",
+            "add sources",
+            "manage sources",
+        ),
+        attachment_menu_terms=(
+            "carregar do dispositivo",
+            "carregar deste dispositivo",
+            "carregar arquivo",
+            "carregar arquivos",
+            "upload from this device",
+            "upload file",
+            "upload files",
+            "upload from computer",
+            "do dispositivo",
+            "do computador",
+            "from this device",
+            "from computer",
+            "browse",
+            "procurar",
+        ),
         launch_urls_first=True,
     ),
     "claude": DesktopAssistant(
@@ -615,7 +642,7 @@ def _reset_lmstudio_conversation(
 ) -> None:
     conversation.update(
         {
-            "name": "Novo chat Resumator 10",
+            "name": "Novo chat Resumator 10.1",
             "pinned": False,
             "createdAt": now_ms,
             "tokenCount": 0,
@@ -1460,6 +1487,8 @@ def send_to_desktop_assistant(
     try:
         _activate_assistant_target(target)
         time.sleep(0.6)
+        target = _prepare_assistant_for_send(assistant, target, notes)
+        title = target.title
 
         if assistant.key == "lmstudio":
             notes.extend(_ensure_lmstudio_recent_model_loaded())
@@ -1505,6 +1534,62 @@ def send_to_desktop_assistant(
     except Exception as exc:  # noqa: BLE001 - surfaced to UI
         _log_automation(f"{assistant.display_name}: falha na automacao. alvo={target}. erro={exc!r}")
         return AutomationResult(False, f"Falha na automação: {exc}", title, notes)
+
+
+def _prepare_assistant_for_send(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+    notes: list[str],
+) -> AssistantTarget:
+    if assistant.force_new_chat_before_send and assistant.key == "copilot":
+        return _prepare_copilot_new_chat(assistant, target, notes)
+    return target
+
+
+def _prepare_copilot_new_chat(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+    notes: list[str],
+) -> AssistantTarget:
+    launched, _ = _launch_assistant_urls(assistant)
+    if launched:
+        notes.append("Novo chat do Copilot solicitado pela URL de abertura.")
+        time.sleep(2.2)
+        refreshed = _assistant_target_from_current_windows(assistant, target)
+        target = refreshed
+        _activate_assistant_target(target)
+        time.sleep(0.5)
+
+    if target.hwnd is None:
+        notes.append("Nao consegui confirmar o botao Novo chat porque a janela do Copilot nao tem handle visivel.")
+        return target
+
+    invoked, detail = _invoke_uia_action(target.hwnd, ("novo chat", "new chat"), "novo chat")
+    _log_automation(f"{assistant.display_name}: tentativa de abrir novo chat: {detail}")
+    if invoked:
+        notes.append("Novo chat do Copilot acionado.")
+        time.sleep(1.4)
+        return _assistant_target_from_current_windows(assistant, target)
+
+    notes.append("Novo chat do Copilot solicitado por URL; botao Novo chat nao foi confirmado.")
+    return target
+
+
+def _assistant_target_from_current_windows(
+    assistant: DesktopAssistant,
+    fallback: AssistantTarget,
+) -> AssistantTarget:
+    windows = find_assistant_windows(assistant.key)
+    if not windows:
+        return fallback
+    hwnd, title = windows[0]
+    return AssistantTarget(
+        hwnd=hwnd,
+        title=title,
+        pid=fallback.pid,
+        candidate_pids=fallback.candidate_pids,
+        note=fallback.note,
+    )
 
 
 def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResult:

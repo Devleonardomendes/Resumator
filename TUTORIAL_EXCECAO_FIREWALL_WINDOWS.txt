@@ -1,0 +1,130 @@
+TUTORIAL - EXCECAO NO WINDOWS PARA BAIXAR E EXECUTAR RESUMATOR 10.1 E KD_MINHA_PET.3.0
+
+Aplicativos cobertos:
+
+1. Resumator 10.1
+   GitHub: https://github.com/Devleonardomendes/Resumator
+   Instalador: downloads/Resumator_10.1_Setup.exe
+   Executavel instalado: %LOCALAPPDATA%\Programs\Resumator 10.1\Resumator 10.1.exe
+
+2. KD_minha_PET.3.0
+   GitHub: https://github.com/Devleonardomendes/KD_minha_PET.2.0
+   Instalador: downloads/KD_minha_PET.3.0_Setup.exe
+   Executavel instalado: %LOCALAPPDATA%\Programs\KD_minha_PET.3.0\KD_minha_PET.3.0.exe
+
+Observacao importante:
+
+O Windows Firewall normalmente nao bloqueia o download de um arquivo pelo navegador.
+Quando o download ou a execucao de um instalador vindo do GitHub e bloqueado, o alerta costuma vir do navegador, do Microsoft Defender, do SmartScreen ou de outro antivirus.
+
+Use estas orientacoes apenas se voce tiver baixado o arquivo diretamente dos repositorios GitHub indicados acima.
+Nao adicione excecoes para arquivos recebidos por email, WhatsApp, links encurtados ou sites desconhecidos.
+
+
+1. SE O NAVEGADOR BLOQUEAR O DOWNLOAD
+
+Microsoft Edge:
+
+1. Clique no icone de downloads.
+2. Localize o arquivo bloqueado.
+3. Clique nos tres pontos ao lado do arquivo.
+4. Escolha "Manter".
+5. Se aparecer uma segunda confirmacao, escolha "Mostrar mais" e depois "Manter mesmo assim".
+
+Google Chrome:
+
+1. Abra a lista de downloads.
+2. Localize o arquivo bloqueado.
+3. Clique em "Manter arquivo" ou "Manter download perigoso".
+4. Confirme apenas se o arquivo veio do GitHub oficial indicado neste tutorial.
+
+
+2. SE O MICROSOFT DEFENDER BLOQUEAR O ARQUIVO
+
+1. Abra o menu Iniciar.
+2. Digite "Seguranca do Windows" e abra o aplicativo.
+3. Entre em "Protecao contra virus e ameacas".
+4. Clique em "Historico de protecao".
+5. Localize o alerta relacionado ao instalador:
+   - Resumator_10.1_Setup.exe
+   - KD_minha_PET.3.0_Setup.exe
+6. Abra o item do alerta.
+7. Clique em "Acoes".
+8. Escolha "Permitir no dispositivo" somente se o arquivo veio do GitHub oficial.
+
+
+3. COMO ADICIONAR UMA EXCECAO NO MICROSOFT DEFENDER
+
+Esta etapa evita que o Defender remova ou coloque em quarentena o instalador ou o executavel instalado.
+
+1. Abra "Seguranca do Windows".
+2. Entre em "Protecao contra virus e ameacas".
+3. Em "Configuracoes de protecao contra virus e ameacas", clique em "Gerenciar configuracoes".
+4. Role ate "Exclusoes".
+5. Clique em "Adicionar ou remover exclusoes".
+6. Clique em "Adicionar uma exclusao".
+7. Escolha "Arquivo".
+8. Selecione o instalador baixado:
+   - %USERPROFILE%\Downloads\Resumator_10.1_Setup.exe
+   - %USERPROFILE%\Downloads\KD_minha_PET.3.0_Setup.exe
+
+Depois de instalar, se o Windows continuar bloqueando a abertura do aplicativo, repita o procedimento e selecione o executavel instalado:
+
+- %LOCALAPPDATA%\Programs\Resumator 10.1\Resumator 10.1.exe
+- %LOCALAPPDATA%\Programs\KD_minha_PET.3.0\KD_minha_PET.3.0.exe
+
+Recomendacao:
+
+Prefira adicionar excecao para o arquivo especifico. Evite liberar a pasta Downloads inteira.
+
+
+4. COMO PERMITIR O APLICATIVO NO WINDOWS FIREWALL
+
+Use esta etapa se, ao abrir o aplicativo, o Windows perguntar se ele pode acessar a rede.
+
+1. Abra o menu Iniciar.
+2. Digite "Permitir um aplicativo pelo Firewall do Windows" e abra a opcao.
+3. Clique em "Alterar configuracoes".
+4. Clique em "Permitir outro aplicativo".
+5. Clique em "Procurar".
+6. Selecione o executavel instalado:
+   - %LOCALAPPDATA%\Programs\Resumator 10.1\Resumator 10.1.exe
+   - %LOCALAPPDATA%\Programs\KD_minha_PET.3.0\KD_minha_PET.3.0.exe
+7. Clique em "Adicionar".
+8. Marque "Privada".
+9. Marque "Publica" somente se voce realmente usar o aplicativo em rede publica.
+10. Clique em "OK".
+
+
+5. COMANDOS OPCIONAIS NO POWERSHELL
+
+Execute o PowerShell como administrador.
+
+Adicionar exclusao do Microsoft Defender para os instaladores baixados:
+
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\Downloads\Resumator_10.1_Setup.exe"
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\Downloads\KD_minha_PET.3.0_Setup.exe"
+
+Adicionar exclusao do Microsoft Defender para os executaveis instalados:
+
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Programs\Resumator 10.1\Resumator 10.1.exe"
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Programs\KD_minha_PET.3.0\KD_minha_PET.3.0.exe"
+
+Criar regras de saida no Windows Firewall:
+
+New-NetFirewallRule -DisplayName "Resumator 10.1" -Direction Outbound -Program "$env:LOCALAPPDATA\Programs\Resumator 10.1\Resumator 10.1.exe" -Action Allow
+New-NetFirewallRule -DisplayName "KD_minha_PET.3.0" -Direction Outbound -Program "$env:LOCALAPPDATA\Programs\KD_minha_PET.3.0\KD_minha_PET.3.0.exe" -Action Allow
+
+
+6. CONFERENCIA FINAL
+
+Antes de executar:
+
+1. Confirme que o arquivo foi baixado do GitHub oficial.
+2. Confirme que o nome do instalador esta correto:
+   - Resumator_10.1_Setup.exe
+   - KD_minha_PET.3.0_Setup.exe
+3. Execute o instalador.
+4. Abra o aplicativo pelo atalho criado na Area de Trabalho ou pelo Menu Iniciar.
+
+Se o Windows voltar a bloquear, abra novamente o "Historico de protecao" e confira qual componente gerou o alerta.

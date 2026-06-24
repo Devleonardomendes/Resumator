@@ -174,7 +174,7 @@ class PromptStore:
         user_prompts = [prompt for prompt in self.all() if not prompt.system]
         payload = {
             "version": 3,
-            "source": "Resumator 10",
+            "source": "Resumator 10.1",
             "exported_at": _now(),
             "prompts": [asdict(prompt) for prompt in user_prompts],
         }
