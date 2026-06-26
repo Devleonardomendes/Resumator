@@ -1,12 +1,12 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $InstallerDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectDir = Split-Path -Parent $InstallerDir
 $DistDir = Join-Path $ProjectDir "dist-py314"
-$AppDir = Join-Path $DistDir "Resumator 10.1"
+$AppDir = Join-Path $DistDir "Resumator 11.0"
 $PayloadDir = Join-Path $InstallerDir "payload"
-$PayloadZip = Join-Path $PayloadDir "Resumator10.1-app.zip"
-$SetupSpec = Join-Path $ProjectDir "build-spec\Resumator 10.1 Setup.spec"
+$PayloadZip = Join-Path $PayloadDir "Resumator11.0-app.zip"
+$SetupSpec = Join-Path $ProjectDir "build-spec\Resumator 11.0 Setup.spec"
 $BuildDir = Join-Path $ProjectDir "build-setup"
 $BuildTools = Join-Path $ProjectDir "build-tools"
 if (-not (Test-Path $BuildTools)) {
@@ -20,7 +20,7 @@ if (-not (Test-Path $PythonExe)) {
     $PythonExe = "python"
 }
 
-if (-not (Test-Path (Join-Path $AppDir "Resumator 10.1.exe"))) {
+if (-not (Test-Path (Join-Path $AppDir "Resumator 11.0.exe"))) {
     throw "Aplicativo nao encontrado em $AppDir. Gere o app principal antes do instalador."
 }
 
@@ -37,7 +37,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller falhou ao gerar o instalador."
 }
 
-$SetupExe = Join-Path $DistDir "Resumator 10.1 Setup.exe"
+$SetupExe = Join-Path $DistDir "Resumator 11.0 Setup.exe"
 if (-not (Test-Path $SetupExe)) {
     throw "Instalador nao gerado em $SetupExe"
 }

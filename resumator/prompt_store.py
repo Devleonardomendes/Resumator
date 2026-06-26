@@ -106,7 +106,7 @@ class PromptStore:
     def update(self, prompt_id: str, name: str, content: str) -> Prompt:
         prompt = self.get(prompt_id)
         if prompt is None:
-            raise KeyError(f"Prompt não encontrado: {prompt_id}")
+            raise KeyError(f"Prompt nÃ£o encontrado: {prompt_id}")
         prompt.name = name.strip()
         prompt.content = content.strip()
         prompt.updated_at = _now()
@@ -117,7 +117,7 @@ class PromptStore:
     def delete(self, prompt_id: str) -> None:
         prompt = self.get(prompt_id)
         if prompt is None:
-            raise KeyError(f"Prompt não encontrado: {prompt_id}")
+            raise KeyError(f"Prompt nÃ£o encontrado: {prompt_id}")
         self._prompts = [prompt for prompt in self._prompts if prompt.id != prompt_id]
         self.save()
 
@@ -171,10 +171,10 @@ class PromptStore:
         return imported, skipped
 
     def export_user_prompts(self, output_path: Path) -> int:
-        user_prompts = [prompt for prompt in self.all() if not prompt.system]
+        user_prompts = self.all()
         payload = {
             "version": 3,
-            "source": "Resumator 10.1",
+            "source": "Resumator 11.0",
             "exported_at": _now(),
             "prompts": [asdict(prompt) for prompt in user_prompts],
         }

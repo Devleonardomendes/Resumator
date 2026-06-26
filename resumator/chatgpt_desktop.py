@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
@@ -9,6 +9,7 @@ from ctypes import wintypes
 import json
 import os
 import platform
+import re
 import shutil
 import struct
 import subprocess
@@ -38,6 +39,7 @@ class AutomationResult:
     window_title: str | None = None
     notes: list[str] = field(default_factory=list)
     text: str = ""
+    rich_html: str = ""
 
 
 class AutomationError(RuntimeError):
@@ -191,52 +193,6 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         ),
         launch_urls_first=True,
     ),
-    "claude": DesktopAssistant(
-        key="claude",
-        display_name="Claude Desktop",
-        window_keywords=("claude", "anthropic"),
-        process_keywords=("claude", "anthropicclaude"),
-        launch_paths=(
-            r"%LOCALAPPDATA%\Programs\Claude\Claude.exe",
-            r"%LOCALAPPDATA%\AnthropicClaude\Claude.exe",
-            r"%LOCALAPPDATA%\AnthropicClaude\app-*\Claude.exe",
-            r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Claude.lnk",
-            r"%USERPROFILE%\Desktop\Claude.lnk",
-            r"%PUBLIC%\Desktop\Claude.lnk",
-        ),
-        launch_commands=(
-            ("explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"),
-            (r"%LOCALAPPDATA%\AnthropicClaude\Update.exe", "--processStart", "Claude.exe"),
-        ),
-        launch_urls=("claude://",),
-        attachment_wait_seconds=8.0,
-        require_visible_window=True,
-        supports_clipboard_file_paste=False,
-        supports_file_dialog_attachment=True,
-        attachment_menu_terms=(
-            "adicionar arquivos ou fotos",
-            "carregar arquivo",
-            "carregar arquivos",
-            "carregar do computador",
-            "upload file",
-            "upload files",
-            "upload from computer",
-            "upload from this device",
-            "fazer upload",
-            "enviar arquivo",
-            "enviar arquivos",
-            "selecionar arquivo",
-            "selecionar arquivos",
-            "escolher arquivo",
-            "choose file",
-            "choose files",
-            "do computador",
-            "do dispositivo",
-            "from computer",
-            "from this device",
-            "browse",
-        ),
-    ),
     "gemini": DesktopAssistant(
         key="gemini",
         display_name="Google Gemini",
@@ -264,29 +220,37 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         ),
         attachment_wait_seconds=4.0,
     ),
-    "jusia": DesktopAssistant(
-        key="jusia",
-        display_name="Jus IA",
-        window_keywords=("jus ia", "ia jusbrasil", "jusbrasil", "ia.jusbrasil.com.br"),
+    "deepseek": DesktopAssistant(
+        key="deepseek",
+        display_name="DeepSeek",
+        window_keywords=("deepseek", "deep seek", "chat.deepseek.com"),
+        launch_paths=(
+            r"%USERPROFILE%\Desktop\DeepSeek.lnk",
+            r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\apps do Chrome\DeepSeek.lnk",
+            r"%LOCALAPPDATA%\Google\Chrome\User Data\Default\Web Applications\_crx_hmjcdonmhijmnefklekckjkeoknbiipb\DeepSeek.lnk",
+        ),
         launch_commands=(
             (
                 r"%ProgramFiles%\Google\Chrome\Application\chrome_proxy.exe",
                 "--profile-directory=Default",
-                "--app-id=abdohjhbhkncbpojnjfhagolpokkcpll",
+                "--app-id=hmjcdonmhijmnefklekckjkeoknbiipb",
             ),
             (
                 r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome_proxy.exe",
                 "--profile-directory=Default",
-                "--app-id=abdohjhbhkncbpojnjfhagolpokkcpll",
+                "--app-id=hmjcdonmhijmnefklekckjkeoknbiipb",
             ),
             (
                 r"%LOCALAPPDATA%\Google\Chrome\Application\chrome_proxy.exe",
                 "--profile-directory=Default",
-                "--app-id=abdohjhbhkncbpojnjfhagolpokkcpll",
+                "--app-id=hmjcdonmhijmnefklekckjkeoknbiipb",
             ),
         ),
-        launch_urls=("https://ia.jusbrasil.com.br/",),
+        launch_urls=("https://chat.deepseek.com/", "https://www.deepseek.com/"),
         attachment_wait_seconds=3.5,
+        require_visible_window=True,
+        supports_clipboard_file_paste=False,
+        supports_file_dialog_attachment=True,
     ),
 }
 
@@ -642,7 +606,7 @@ def _reset_lmstudio_conversation(
 ) -> None:
     conversation.update(
         {
-            "name": "Novo chat Resumator 10.1",
+            "name": "Novo chat Resumator 11.0",
             "pinned": False,
             "createdAt": now_ms,
             "tokenCount": 0,
@@ -1131,7 +1095,7 @@ def _matches_assistant_window(title: str, process_text: str, assistant: DesktopA
         process_text
         and any(keyword.casefold() in process_folded for keyword in assistant.process_keywords)
     )
-    if assistant.key in {"claude", "lmstudio"}:
+    if assistant.key == "lmstudio":
         return process_matches
 
     if title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords):
@@ -1499,17 +1463,24 @@ def send_to_desktop_assistant(
         if attach_pdf:
             attachment_paths.extend(pdf_paths)
 
-        attached = False
-        if attachment_paths:
-            attachment_result = _attach_files_to_assistant(assistant, target, attachment_paths)
-            attached = attachment_result.attached
-            notes.extend(attachment_result.notes)
+        all_requested_attachments_attached = True
+        pdfs_attached = False
+        if prompt_document_paths:
+            prompt_document_result = _attach_files_to_assistant(assistant, target, prompt_document_paths)
+            all_requested_attachments_attached = prompt_document_result.attached
+            notes.extend(prompt_document_result.notes)
+
+        if attach_pdf and pdf_paths:
+            pdf_attachment_result = _attach_files_to_assistant_sequentially(assistant, target, pdf_paths)
+            pdfs_attached = pdf_attachment_result.attached
+            all_requested_attachments_attached = all_requested_attachments_attached and pdf_attachment_result.attached
+            notes.extend(pdf_attachment_result.notes)
 
         if paste_prompt_text:
             message = _build_message(
                 prompt_text,
                 pdf_paths,
-                attached=bool(attach_pdf and attached),
+                attached=bool(attach_pdf and pdfs_attached),
                 assistant_key=assistant.key,
             )
         else:
@@ -1521,7 +1492,7 @@ def send_to_desktop_assistant(
             _hotkey("ctrl", "v")
             time.sleep(0.2)
 
-        if submit and not _must_pause_for_attachment(attachment_paths, attached):
+        if submit and not _must_pause_for_attachment(attachment_paths, all_requested_attachments_attached):
             _press("enter")
         elif submit:
             notes.append(
@@ -1659,6 +1630,10 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
                 notes,
             )
 
+        rich_html = get_clipboard_html()
+        if rich_html:
+            notes.append("Formatação HTML da resposta capturada para exportação em DOCX/PDF.")
+
         _log_automation(f"{assistant.display_name}: resposta capturada. alvo={target}")
         return AutomationResult(
             True,
@@ -1666,6 +1641,7 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
             target.title,
             notes,
             copied_text,
+            rich_html,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to UI
         if clipboard_was_read:
@@ -2303,6 +2279,52 @@ def get_clipboard_text() -> str:
         win32clipboard.CloseClipboard()
 
 
+def get_clipboard_html() -> str:
+    if win32clipboard is None:
+        return ""
+    try:
+        html_format = win32clipboard.RegisterClipboardFormat("HTML Format")
+        win32clipboard.OpenClipboard()
+        try:
+            if not win32clipboard.IsClipboardFormatAvailable(html_format):
+                return ""
+            data = win32clipboard.GetClipboardData(html_format)
+        finally:
+            win32clipboard.CloseClipboard()
+    except Exception:
+        return ""
+
+    if isinstance(data, bytes):
+        raw_html = data.decode("utf-8", errors="replace")
+    else:
+        raw_html = str(data)
+    return _extract_clipboard_html_fragment(raw_html)
+
+
+def _extract_clipboard_html_fragment(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    start_match = re.search(r"StartFragment:(\d+)", raw_html)
+    end_match = re.search(r"EndFragment:(\d+)", raw_html)
+    if start_match and end_match:
+        try:
+            start = int(start_match.group(1))
+            end = int(end_match.group(1))
+            if 0 <= start < end <= len(raw_html):
+                return raw_html[start:end].strip()
+        except ValueError:
+            pass
+
+    start_marker = "<!--StartFragment-->"
+    end_marker = "<!--EndFragment-->"
+    start_index = raw_html.find(start_marker)
+    end_index = raw_html.find(end_marker)
+    if start_index != -1 and end_index != -1 and end_index > start_index:
+        start_index += len(start_marker)
+        return raw_html[start_index:end_index].strip()
+    return raw_html.strip()
+
+
 def _normalize_paths(file_path: Path | Iterable[Path] | None) -> list[Path]:
     if file_path is None:
         return []
@@ -2344,6 +2366,21 @@ def _manual_attachment_note(file_paths: list[Path], assistant: DesktopAssistant)
 
 def _must_pause_for_attachment(file_paths: list[Path], attached: bool) -> bool:
     return bool(file_paths and not attached)
+
+
+def _attach_files_to_assistant_sequentially(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+    file_paths: list[Path],
+) -> AttachmentResult:
+    notes: list[str] = []
+    total = len(file_paths)
+    for index, file_path in enumerate(file_paths, start=1):
+        result = _attach_files_to_assistant(assistant, target, [file_path])
+        notes.extend(f"PDF {index}/{total}: {note}" for note in result.notes)
+        if not result.attached:
+            return AttachmentResult(False, notes)
+    return AttachmentResult(bool(file_paths), notes)
 
 
 def _attach_files_to_assistant(
@@ -2397,11 +2434,6 @@ def _attach_files_to_assistant(
 def _open_attachment_dialog(assistant: DesktopAssistant, target: AssistantTarget) -> bool:
     hwnd = target.hwnd or _foreground_window_handle()
     if hwnd:
-        if assistant.key == "claude":
-            _hotkey("ctrl", "u")
-            _log_automation(f"{assistant.display_name}: tentativa de acionar anexo por atalho Ctrl+U")
-            if _wait_for_file_dialog(timeout_seconds=3.0):
-                return True
 
         invoked, detail = _invoke_uia_action(hwnd, assistant.attachment_button_terms, "controle de anexo")
         _log_automation(f"{assistant.display_name}: tentativa de acionar botao de anexo: {detail}")

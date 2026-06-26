@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
@@ -7,7 +7,7 @@ import traceback
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
-LOG_PATH = APP_DIR / "resumator-10.1.log"
+LOG_PATH = APP_DIR / "resumator-11.0.log"
 
 
 def write_log(message: str) -> None:

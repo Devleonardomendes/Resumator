@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import json
 import os
 import sys
@@ -13,7 +13,7 @@ from resumator.ui import ResumatorApp, main
 def self_test() -> int:
     import tkinter as tk
 
-    output_dir = Path(tempfile.gettempdir()) / "resumator-10.1-self-test"
+    output_dir = Path(tempfile.gettempdir()) / "resumator-11.0-self-test"
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostic_path = output_dir / "diagnostic.txt"
 
@@ -49,13 +49,13 @@ def self_test() -> int:
     mark("exporting-pdf")
     export_response_pdf(
         output_dir / "self-test.pdf",
-        "Teste automatizado do Resumator 10.1.",
+        "Teste automatizado do Resumator 11.0.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("exporting-docx")
     export_response_docx(
         output_dir / "self-test.docx",
-        "Teste automatizado do Resumator 10.1.",
+        "Teste automatizado do Resumator 11.0.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("exporting-docx-fallback")
@@ -66,7 +66,7 @@ def self_test() -> int:
         pdf_export_module.Pt = None
         export_response_docx(
             output_dir / "self-test-fallback.docx",
-            "Teste automatizado do fallback DOCX do Resumator 10.1.",
+            "Teste automatizado do fallback DOCX do Resumator 11.0.",
             prompt_name=selected_prompt.name if selected_prompt else None,
         )
     finally:
@@ -74,7 +74,7 @@ def self_test() -> int:
     mark("exporting-json")
     export_response_json(
         output_dir / "self-test.json",
-        "Teste automatizado do Resumator 10.1.",
+        "Teste automatizado do Resumator 11.0.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("checking-prompts")

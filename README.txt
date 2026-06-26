@@ -1,4 +1,4 @@
-Resumator 10.1
+Resumator 11.0
 ==============
 
 Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs para assistentes de IA, capturar a resposta e exportar em PDF, DOCX, JSON ou diretamente para o QUIMERA.
@@ -6,11 +6,9 @@ Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs
 Download
 --------
 
-Baixe o instalador Windows em downloads\Resumator_10.1_Setup.exe.
+Baixe o instalador Windows em downloads\Resumator_11.0_Setup.exe.
 
-Tutorial de excecao no Windows: TUTORIAL_EXCECAO_FIREWALL_WINDOWS.txt.
-
-Versao atualizada em 24/06/2026 com bloqueio de novos PDFs apos a escolha da IA, nome de exportacao baseado no numero do processo e instalador da versao 10.1.
+Versao 11.0: inclui suporte ao DeepSeek, preserva a formatacao capturada da IA nas exportacoes DOCX/PDF e mantem JSON/QUIMERA em texto puro.
 
 Assistente de Prompt
 --------------------
@@ -60,54 +58,56 @@ O botao "Assistente" abre uma janela grande com alternativas de escolha unica pa
 Uso basico
 ----------
 
-1. Abra o Resumator 10.1.
+1. Abra o Resumator 11.0.
 2. Crie um prompt em "Personalizado", importe prompts ou use o "Assistente".
 3. Selecione de 1 a 10 PDFs.
 4. Escolha o destino de IA.
 5. Escolha o modo de envio: texto colado ou documento DOCX.
 6. Envie o prompt e os documentos.
-7. Capture a resposta ou cole o texto manualmente.
-8. Exporte em PDF, DOCX, JSON ou acione o QUIMERA.
+7. Capture a resposta da IA ou cole o texto manualmente.
+8. Exporte em PDF, DOCX, JSON, acione o QUIMERA ou importe um DOCX para gerar PDF.
 
 Automacao local
 ---------------
 
-A automacao atua somente nos destinos cadastrados: ChatGPT Desktop, Microsoft 365 Copilot, Claude Desktop, Google Gemini, LM Studio Desktop e Jus IA. Ela usa apenas os PDFs selecionados no Resumator e registra logs de tentativa.
+A automacao atua somente nos destinos cadastrados: ChatGPT Desktop, Microsoft 365 Copilot, Google Gemini, LM Studio Desktop e DeepSeek. Ela usa apenas os PDFs selecionados no Resumator e registra logs de tentativa.
 
 No modo "Texto colado", o prompt e colado no campo de mensagem e os PDFs sao anexados conforme a opcao selecionada.
 
 No modo "Documento DOCX", o Resumator cria um DOCX temporario com o prompt e anexa esse arquivo junto dos PDFs.
 
-No Microsoft 365 Copilot, o Resumator 10.1 sempre abre um novo chat por solicitacao, cola o prompt como texto e anexa apenas os PDFs selecionados. Se o seletor de arquivos nao for confirmado, o envio fica pausado para conferencia.
+No Microsoft 365 Copilot, o Resumator 11.0 sempre abre um novo chat por solicitacao, cola o prompt como texto e anexa apenas os PDFs selecionados. Se o seletor de arquivos nao for confirmado, o envio fica pausado para conferencia.
 
-Copilot, Gemini e Claude podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta colar os arquivos como anexos e mantem o envio pausado para conferencia.
+Copilot, Gemini e DeepSeek podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta alternativas de anexo e mantem o envio pausado para conferencia quando necessario.
+
+A captura automatica procura o botao "Copiar" da resposta mais recente. Quando o clipboard da IA fornece HTML, o Resumator preserva essa formatacao para exportar DOCX e PDF. A integracao com QUIMERA e a exportacao JSON continuam usando texto sem formatacao.
 
 Integracao com QUIMERA
 ----------------------
 
-O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 10.1. A exportacao manual em JSON continua disponivel como alternativa.
+O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 11.0. A exportacao manual em JSON continua disponivel como alternativa.
 
 Arquivos principais
 -------------------
 
 - app.py: entrada do aplicativo.
-- resumator\: codigo fonte principal do projeto local.
-- data\prompts.json: arquivo inicial de prompts da versao, distribuido vazio.
+- resumator/: codigo fonte principal do projeto local.
+- data/prompts.json: arquivo inicial de prompts da versao.
 - README.txt: documentacao em texto aberta pelo botao Readme.
-- saidas\: pasta padrao para PDF, DOCX e logs quando usado em modo fonte.
+- saidas/: pasta padrao para PDF, DOCX e logs quando usado em modo fonte.
 
 Build
 -----
 
 Aplicativo:
 
-python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 10.1.spec"
+python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 11.0.spec"
 
 Instalador:
 
-powershell -ExecutionPolicy Bypass -File installer\build_setup.ps1
+powershell -ExecutionPolicy Bypass -File installeruild_setup.ps1
 
 Artefatos esperados:
 
-- dist-py314\Resumator 10.1\Resumator 10.1.exe
-- dist-py314\Resumator 10.1 Setup.exe
+- dist-py314\Resumator 11.0\Resumator 11.0.exe
+- dist-py314\Resumator 11.0 Setup.exe
