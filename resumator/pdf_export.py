@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import textwrap
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
@@ -52,7 +53,7 @@ TOP = 735
 BOTTOM = 58
 LINE_HEIGHT = 14
 BODY_FONT_SIZE = 10
-APP_NAME = "Resumator 11.0"
+APP_NAME = "Resumator 11.2"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 DOCUMENT_TITLE = "RESUMO GERADO POR IA"
 PROMPT_DOCUMENT_TITLE = "PROMPT PARA ENVIO À IA"
@@ -79,6 +80,7 @@ class RichBlock:
 
 class _ResponseHtmlParser(HTMLParser):
     BLOCK_TAGS = {"p", "div", "section", "article", "main", "blockquote"}
+    SKIP_CONTENT_TAGS = {"style", "script", "template", "svg", "noscript"}
     STYLE_TAGS = {
         "b": "bold",
         "strong": "bold",
@@ -98,16 +100,27 @@ class _ResponseHtmlParser(HTMLParser):
         self.style_stack: list[dict[str, bool]] = [
             {"bold": False, "italic": False, "underline": False, "code": False}
         ]
+        self.attr_style_stack: list[str] = []
         self.list_stack: list[str] = []
+        self.skip_content_depth = 0
         self.table_rows: list[list[list[RichRun]]] | None = None
         self.current_row: list[list[RichRun]] | None = None
         self.current_cell: list[RichRun] | None = None
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
+        if tag in self.SKIP_CONTENT_TAGS:
+            self.skip_content_depth += 1
+            return
+        if self.skip_content_depth:
+            return
         if tag in self.STYLE_TAGS:
             self._push_style(**{self.STYLE_TAGS[tag]: True})
             return
+        attr_style = self._style_changes_from_attrs(attrs)
+        if attr_style and tag not in {"br", "hr", "img", "input", "link", "meta"}:
+            self._push_style(**attr_style)
+            self.attr_style_stack.append(tag)
         if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self._finish_block()
             self.current_kind = "heading"
@@ -149,40 +162,57 @@ class _ResponseHtmlParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag in self.SKIP_CONTENT_TAGS:
+            if self.skip_content_depth:
+                self.skip_content_depth -= 1
+            return
+        if self.skip_content_depth:
+            return
         if tag in self.STYLE_TAGS:
             self._pop_style()
             return
         if tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "section", "article", "main", "blockquote"}:
             self._finish_block()
+            self._pop_attr_style(tag)
             return
         if tag == "pre":
             self._finish_block()
             self._pop_style()
+            self._pop_attr_style(tag)
             return
         if tag == "li":
             self._finish_block()
+            self._pop_attr_style(tag)
             return
         if tag in {"ul", "ol"}:
             if self.list_stack:
                 self.list_stack.pop()
+            self._pop_attr_style(tag)
             return
         if tag in {"td", "th"} and self.current_cell is not None and self.current_row is not None:
             if tag == "th":
                 self._pop_style()
             self.current_row.append(self._normalized_runs(self.current_cell))
             self.current_cell = None
+            self._pop_attr_style(tag)
             return
         if tag == "tr" and self.current_row is not None and self.table_rows is not None:
             if self.current_row:
                 self.table_rows.append(self.current_row)
             self.current_row = None
+            self._pop_attr_style(tag)
             return
         if tag == "table" and self.table_rows is not None:
             if self.table_rows:
                 self.blocks.append(RichBlock(kind="table", rows=self.table_rows))
             self.table_rows = None
+            self._pop_attr_style(tag)
+            return
+        self._pop_attr_style(tag)
 
     def handle_data(self, data: str) -> None:
+        if self.skip_content_depth:
+            return
         self._append_text(data)
 
     def close(self) -> None:
@@ -197,6 +227,42 @@ class _ResponseHtmlParser(HTMLParser):
     def _pop_style(self) -> None:
         if len(self.style_stack) > 1:
             self.style_stack.pop()
+
+    def _pop_attr_style(self, tag: str) -> None:
+        if self.attr_style_stack and self.attr_style_stack[-1] == tag:
+            self.attr_style_stack.pop()
+            self._pop_style()
+
+    @staticmethod
+    def _style_changes_from_attrs(attrs: list[tuple[str, str | None]]) -> dict[str, bool]:
+        attr_map = {name.lower(): value or "" for name, value in attrs}
+        style = attr_map.get("style", "").casefold()
+        class_names = attr_map.get("class", "").casefold()
+        changes: dict[str, bool] = {}
+
+        weight_match = re.search(r"font-weight\s*:\s*([^;]+)", style)
+        if weight_match:
+            weight = weight_match.group(1).strip()
+            if weight in {"bold", "bolder"}:
+                changes["bold"] = True
+            else:
+                number_match = re.search(r"\d+", weight)
+                if number_match and int(number_match.group(0)) >= 600:
+                    changes["bold"] = True
+        if re.search(r"\b(font-bold|font-semibold|font-extrabold|bold)\b", class_names):
+            changes["bold"] = True
+
+        if "font-style" in style and "italic" in style:
+            changes["italic"] = True
+        if re.search(r"\bitalic\b", class_names):
+            changes["italic"] = True
+
+        if "text-decoration" in style and "underline" in style:
+            changes["underline"] = True
+        if re.search(r"\bunderline\b", class_names):
+            changes["underline"] = True
+
+        return changes
 
     def _append_text(self, text: str) -> None:
         if not text:
@@ -277,11 +343,18 @@ def export_response_pdf(
     source_pdf: Path | Iterable[Path] | None = None,
     formatted_html: str | None = None,
 ) -> Path:
-    if formatted_html and _can_export_formatted_pdf():
+    if formatted_html:
         blocks = _rich_blocks_from_html(formatted_html)
         if blocks:
-            _export_formatted_pdf(output_path, response_text, prompt_name, source_pdf, blocks)
-            return output_path
+            if _can_export_formatted_pdf():
+                _export_formatted_pdf(output_path, response_text, prompt_name, source_pdf, blocks)
+                return output_path
+            if _export_formatted_pdf_via_word(output_path, response_text, prompt_name, source_pdf, formatted_html):
+                return output_path
+            raise RuntimeError(
+                "A exportação PDF formatada não está disponível. Recompile o Resumator com a dependência "
+                "ReportLab ou instale o Microsoft Word para a conversão DOCX->PDF."
+            )
 
     lines = _prepare_lines(response_text, prompt_name, source_pdf)
     if canvas is not None:
@@ -496,6 +569,38 @@ def _export_formatted_pdf(
         title=DOCUMENT_TITLE,
     )
     doc.build(elements)
+
+
+def _export_formatted_pdf_via_word(
+    output_path: Path,
+    response_text: str,
+    prompt_name: str | None,
+    source_pdf: Path | Iterable[Path] | None,
+    formatted_html: str,
+) -> bool:
+    if os.name != "nt" or Document is None or Inches is None or Pt is None:
+        return False
+
+    temp_dir = Path(tempfile.gettempdir()) / "resumator-11.2-pdf-export"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_docx = temp_dir / f"{output_path.stem}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}.docx"
+    try:
+        export_response_docx(
+            temp_docx,
+            response_text,
+            prompt_name=prompt_name,
+            source_pdf=source_pdf,
+            document_title=DOCUMENT_TITLE,
+            formatted_html=formatted_html,
+        )
+        return _export_docx_with_word(temp_docx, output_path)
+    except Exception:
+        return False
+    finally:
+        try:
+            temp_docx.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _append_pdf_table(elements: list, block: RichBlock, normal_style) -> None:
@@ -773,10 +878,27 @@ def _reportlab_fonts() -> tuple[str, str]:
     windows_dir = Path(os.environ.get("WINDIR", r"C:\Windows"))
     regular_path = windows_dir / "Fonts" / "arial.ttf"
     bold_path = windows_dir / "Fonts" / "arialbd.ttf"
+    italic_path = windows_dir / "Fonts" / "ariali.ttf"
+    bold_italic_path = windows_dir / "Fonts" / "arialbi.ttf"
     try:
         if regular_path.exists() and bold_path.exists():
             pdfmetrics.registerFont(TTFont("ResumatorArial", str(regular_path)))
             pdfmetrics.registerFont(TTFont("ResumatorArialBold", str(bold_path)))
+            italic_font = "ResumatorArial"
+            bold_italic_font = "ResumatorArialBold"
+            if italic_path.exists():
+                pdfmetrics.registerFont(TTFont("ResumatorArialItalic", str(italic_path)))
+                italic_font = "ResumatorArialItalic"
+            if bold_italic_path.exists():
+                pdfmetrics.registerFont(TTFont("ResumatorArialBoldItalic", str(bold_italic_path)))
+                bold_italic_font = "ResumatorArialBoldItalic"
+            pdfmetrics.registerFontFamily(
+                "ResumatorArial",
+                normal="ResumatorArial",
+                bold="ResumatorArialBold",
+                italic=italic_font,
+                boldItalic=bold_italic_font,
+            )
             return "ResumatorArial", "ResumatorArialBold"
     except Exception:
         pass
@@ -930,3 +1052,4 @@ def _pdf_string(text: str) -> bytes:
     raw = text.encode("cp1252", errors="replace")
     raw = raw.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
     return b"(" + raw + b")"
+

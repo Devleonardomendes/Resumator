@@ -21,6 +21,8 @@ from typing import Iterable
 IS_WINDOWS = platform.system().lower() == "windows"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 LOG_PATH = APP_DIR / "resumator-automation.log"
+PROMPT_TO_FIRST_PDF_DELAY_SECONDS = 2.0
+PDF_ATTACHMENT_WAIT_SECONDS = 3.0
 
 try:
     import win32clipboard  # type: ignore
@@ -606,7 +608,7 @@ def _reset_lmstudio_conversation(
 ) -> None:
     conversation.update(
         {
-            "name": "Novo chat Resumator 11.0",
+            "name": "Novo chat Resumator 11.2",
             "pinned": False,
             "createdAt": now_ms,
             "tokenCount": 0,
@@ -1463,24 +1465,12 @@ def send_to_desktop_assistant(
         if attach_pdf:
             attachment_paths.extend(pdf_paths)
 
-        all_requested_attachments_attached = True
-        pdfs_attached = False
-        if prompt_document_paths:
-            prompt_document_result = _attach_files_to_assistant(assistant, target, prompt_document_paths)
-            all_requested_attachments_attached = prompt_document_result.attached
-            notes.extend(prompt_document_result.notes)
-
-        if attach_pdf and pdf_paths:
-            pdf_attachment_result = _attach_files_to_assistant_sequentially(assistant, target, pdf_paths)
-            pdfs_attached = pdf_attachment_result.attached
-            all_requested_attachments_attached = all_requested_attachments_attached and pdf_attachment_result.attached
-            notes.extend(pdf_attachment_result.notes)
-
         if paste_prompt_text:
+            message_pdf_paths = [] if attach_pdf else pdf_paths
             message = _build_message(
                 prompt_text,
-                pdf_paths,
-                attached=bool(attach_pdf and pdfs_attached),
+                message_pdf_paths,
+                attached=False,
                 assistant_key=assistant.key,
             )
         else:
@@ -1491,6 +1481,24 @@ def send_to_desktop_assistant(
             time.sleep(0.1)
             _hotkey("ctrl", "v")
             time.sleep(0.2)
+            if attach_pdf and pdf_paths:
+                time.sleep(PROMPT_TO_FIRST_PDF_DELAY_SECONDS)
+
+        all_requested_attachments_attached = True
+        if prompt_document_paths:
+            prompt_document_result = _attach_files_to_assistant(assistant, target, prompt_document_paths)
+            all_requested_attachments_attached = prompt_document_result.attached
+            notes.extend(prompt_document_result.notes)
+
+        if attach_pdf and pdf_paths:
+            pdf_attachment_result = _attach_files_to_assistant_sequentially(
+                assistant,
+                target,
+                pdf_paths,
+                wait_seconds=PDF_ATTACHMENT_WAIT_SECONDS,
+            )
+            all_requested_attachments_attached = all_requested_attachments_attached and pdf_attachment_result.attached
+            notes.extend(pdf_attachment_result.notes)
 
         if submit and not _must_pause_for_attachment(attachment_paths, all_requested_attachments_attached):
             _press("enter")
@@ -1619,7 +1627,8 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
                 notes,
             )
 
-        copied_text = _wait_for_clipboard_text_change(sentinel, timeout_seconds=5.0)
+        clipboard_timeout = 8.0 if assistant.key == "gemini" else 5.0
+        copied_text = _wait_for_clipboard_text_change(sentinel, timeout_seconds=clipboard_timeout)
         if not copied_text:
             if clipboard_was_read:
                 _set_clipboard_text(previous_clipboard)
@@ -1629,6 +1638,12 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
                 target.title,
                 notes,
             )
+
+        if assistant.key == "copilot":
+            cleaned_text = _clean_copilot_clipboard_text(copied_text)
+            if cleaned_text != copied_text:
+                copied_text = cleaned_text
+                notes.append("Trecho tecnico de CSS do clipboard do Copilot removido da resposta.")
 
         rich_html = get_clipboard_html()
         if rich_html:
@@ -1658,17 +1673,58 @@ def _invoke_copy_response_action(assistant: DesktopAssistant, target: AssistantT
     if not hwnd:
         return False, "Nao ha janela ativa para procurar o botao de copiar."
 
-    invoked, detail = _invoke_uia_action(hwnd, assistant.response_copy_terms, "botao de copiar resposta")
-    _log_automation(f"{assistant.display_name}: tentativa UIA de copiar resposta: {detail}")
-    if invoked:
-        return True, "Botao de copiar resposta acionado por UI Automation."
+    attempts = 4 if assistant.key == "gemini" else 1
+    details: list[str] = []
+    for attempt in range(1, attempts + 1):
+        if assistant.key == "gemini":
+            _reveal_latest_response_actions(hwnd)
 
-    visual_invoked, visual_detail = _invoke_visual_copy_button(hwnd)
-    _log_automation(f"{assistant.display_name}: tentativa visual de copiar resposta: {visual_detail}")
-    if visual_invoked:
-        return True, "Botao de copiar resposta acionado pelo icone."
+        invoked, detail = _invoke_uia_action(hwnd, assistant.response_copy_terms, "botao de copiar resposta")
+        _log_automation(f"{assistant.display_name}: tentativa UIA de copiar resposta {attempt}/{attempts}: {detail}")
+        if invoked:
+            return True, "Botao de copiar resposta acionado por UI Automation."
 
-    return False, f"Nao encontrei o botao de copiar resposta. UIA: {detail}; visual: {visual_detail}"
+        visual_invoked, visual_detail = _invoke_visual_copy_button(hwnd)
+        _log_automation(
+            f"{assistant.display_name}: tentativa visual de copiar resposta {attempt}/{attempts}: {visual_detail}"
+        )
+        if visual_invoked:
+            return True, "Botao de copiar resposta acionado pelo icone."
+
+        details.append(f"tentativa {attempt}: UIA={detail}; visual={visual_detail}")
+        if attempt < attempts:
+            time.sleep(3.0)
+
+    suffix = ""
+    if assistant.key == "gemini":
+        suffix = " A resposta do Gemini pode ainda estar em geração ou com os botões de ação ocultos."
+    return False, f"Nao encontrei o botao de copiar resposta. {' | '.join(details)}{suffix}"
+
+
+def _reveal_latest_response_actions(hwnd: int) -> None:
+    if not IS_WINDOWS:
+        return
+
+    try:
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+            return
+
+        width = max(1, rect.right - rect.left)
+        height = max(1, rect.bottom - rect.top)
+        x = int(rect.left + width * 0.56)
+        y = int(rect.top + height * 0.72)
+        user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        user32.SetCursorPos(x, y)
+        user32.mouse_event(0x0800, 0, 0, -120 * 5, 0)
+        time.sleep(0.25)
+        user32.SetCursorPos(x, y)
+        time.sleep(0.45)
+    except Exception as exc:  # noqa: BLE001 - reveal is best-effort
+        _log_automation(f"Falha ao tentar revelar botoes da resposta: {exc!r}")
 
 
 def _wait_for_clipboard_text_change(sentinel: str, timeout_seconds: float) -> str:
@@ -1682,6 +1738,46 @@ def _wait_for_clipboard_text_change(sentinel: str, timeout_seconds: float) -> st
         if text and text != sentinel:
             return text.strip()
     return ""
+
+
+def _clean_copilot_clipboard_text(text: str) -> str:
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cleaned: list[str] = []
+    skipping_leading_noise = True
+    removed_any = False
+    for line in lines:
+        if skipping_leading_noise:
+            if not line.strip():
+                cleaned.append(line)
+                continue
+            if _looks_like_copilot_css_noise(line):
+                removed_any = True
+                continue
+            skipping_leading_noise = False
+        cleaned.append(line)
+    if not removed_any:
+        return text.strip()
+    return "\n".join(cleaned).strip()
+
+
+def _looks_like_copilot_css_noise(line: str) -> bool:
+    folded = line.strip().casefold()
+    if not folded:
+        return False
+    if "{" not in folded or "}" not in folded or ":" not in folded:
+        return False
+    css_terms = (
+        "text-decoration",
+        "color:",
+        "border:",
+        "background:",
+        "background-color",
+        "font-",
+        "margin",
+        "padding",
+    )
+    selector_terms = ("a {", "tr ", "td ", "th ", "table", "span", "div", "p {", "}")
+    return any(term in folded for term in css_terms) and any(term in folded for term in selector_terms)
 
 
 def _invoke_visual_copy_button(hwnd: int) -> tuple[bool, str]:
@@ -2372,11 +2468,12 @@ def _attach_files_to_assistant_sequentially(
     assistant: DesktopAssistant,
     target: AssistantTarget,
     file_paths: list[Path],
+    wait_seconds: float | None = None,
 ) -> AttachmentResult:
     notes: list[str] = []
     total = len(file_paths)
     for index, file_path in enumerate(file_paths, start=1):
-        result = _attach_files_to_assistant(assistant, target, [file_path])
+        result = _attach_files_to_assistant(assistant, target, [file_path], wait_seconds=wait_seconds)
         notes.extend(f"PDF {index}/{total}: {note}" for note in result.notes)
         if not result.attached:
             return AttachmentResult(False, notes)
@@ -2387,18 +2484,20 @@ def _attach_files_to_assistant(
     assistant: DesktopAssistant,
     target: AssistantTarget,
     file_paths: list[Path],
+    wait_seconds: float | None = None,
 ) -> AttachmentResult:
+    upload_wait_seconds = assistant.attachment_wait_seconds if wait_seconds is None else wait_seconds
     if assistant.supports_clipboard_file_paste:
         attached = _copy_files_to_clipboard(file_paths)
         if attached:
             _hotkey("ctrl", "v")
-            time.sleep(assistant.attachment_wait_seconds)
+            time.sleep(upload_wait_seconds)
             return AttachmentResult(True, [_attachment_note(file_paths)])
         return AttachmentResult(False, ["Não foi possível colocar os arquivos na área de transferência como anexo."])
 
     if assistant.supports_file_dialog_attachment:
         if _open_attachment_dialog(assistant, target):
-            if _select_files_in_open_dialog(file_paths, assistant.attachment_wait_seconds):
+            if _select_files_in_open_dialog(file_paths, upload_wait_seconds):
                 return AttachmentResult(True, [_dialog_attachment_note(file_paths, assistant)])
             return AttachmentResult(
                 False,
@@ -2411,7 +2510,7 @@ def _attach_files_to_assistant(
         clipboard_attempted = _copy_files_to_clipboard(file_paths)
         if clipboard_attempted:
             _hotkey("ctrl", "v")
-            time.sleep(assistant.attachment_wait_seconds)
+            time.sleep(upload_wait_seconds)
             if assistant.trust_clipboard_attachment_fallback:
                 return AttachmentResult(
                     True,
@@ -2944,3 +3043,4 @@ def _key_down(vk: int) -> None:
 def _key_up(vk: int) -> None:
     KEYEVENTF_KEYUP = 0x0002
     ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+

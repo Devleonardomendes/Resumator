@@ -80,13 +80,13 @@ def _write_payload(
     prompt_name: str | None,
     source_pdf: Path | Iterable[Path] | None,
 ) -> Path:
-    output_dir = Path(tempfile.gettempdir()) / "resumator-11.0-quimera"
+    output_dir = Path(tempfile.gettempdir()) / "resumator-11.2-quimera"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"resumo-quimera-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     source_pdfs = _normalize_source_pdfs(source_pdf)
     payload = {
         "version": 1,
-        "source": "Resumator 11.0",
+        "source": "Resumator 11.2",
         "target": "QUIMERA",
         "type": "resumo_peticao_inicial",
         "exported_at": datetime.now().isoformat(timespec="seconds"),
@@ -214,3 +214,4 @@ def _unique_paths(paths: Iterable[Path]) -> list[Path]:
         seen.add(key)
         unique.append(path)
     return unique
+

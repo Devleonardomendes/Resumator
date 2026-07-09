@@ -1,12 +1,12 @@
-# Resumator 11.0
+# Resumator 11.2
 
 Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs para assistentes de IA, capturar a resposta e exportar em PDF, DOCX, JSON ou diretamente para o QUIMERA.
 
 ## Download
 
-Baixe o instalador Windows em [`downloads/Resumator_11.0_Setup.exe`](downloads/Resumator_11.0_Setup.exe).
+Baixe o instalador Windows em [`downloads/Resumator_11.2_Setup.exe`](downloads/Resumator_11.2_Setup.exe).
 
-Versao 11.0: inclui suporte ao DeepSeek, preserva a formatacao capturada da IA nas exportacoes DOCX/PDF e mantem JSON/QUIMERA em texto puro.
+Versao 11.2: ao escolher qualquer IA, marca por padrao "Texto colado" e "Somente texto colado", deixa "Enviar ao final" desmarcado, cola o prompt antes dos PDFs, aguarda 2 segundos antes do primeiro PDF, aguarda 3 segundos entre PDFs, bloqueia o mouse por 5 segundos na captura e remove CSS tecnico do clipboard do Copilot.
 
 ## Assistente de Prompt
 
@@ -54,32 +54,37 @@ O botao "Assistente" abre uma janela grande com alternativas de escolha unica pa
 
 ## Uso basico
 
-1. Abra o Resumator 11.0.
-2. Crie um prompt em "Personalizado", importe prompts ou use o "Assistente".
-3. Selecione de 1 a 10 PDFs.
-4. Escolha o destino de IA.
-5. Escolha o modo de envio: texto colado ou documento DOCX.
-6. Envie o prompt e os documentos.
-7. Capture a resposta da IA ou cole o texto manualmente.
-8. Exporte em PDF, DOCX, JSON, acione o QUIMERA ou importe um DOCX para gerar PDF.
+1. Abra o Resumator 11.2.
+2. Informe o número do processo administrativo/judicial.
+3. Crie ou selecione um prompt em "Personalizado", importe prompts ou use o "Assistente".
+4. Selecione de 1 a 10 PDFs ou arraste os PDFs para "Adicionar PDF".
+5. Escolha o destino de IA.
+6. Confira o modo de envio. "Texto colado" e "Somente texto colado" ficam marcados por padrao; "Enviar ao final" fica desmarcado.
+7. Envie o prompt e os documentos.
+8. Capture a resposta da IA ou cole o texto manualmente.
+9. Exporte em PDF, DOCX, JSON, acione o QUIMERA ou importe um DOCX para gerar PDF.
 
 ## Automacao local
 
 A automacao atua somente nos destinos cadastrados: ChatGPT Desktop, Microsoft 365 Copilot, Google Gemini, LM Studio Desktop e DeepSeek. Ela usa apenas os PDFs selecionados no Resumator e registra logs de tentativa.
 
-No modo "Texto colado", o prompt e colado no campo de mensagem e os PDFs sao anexados conforme a opcao selecionada.
+No modo "Texto colado", o prompt e colado no campo de mensagem antes da anexacao dos PDFs. Depois de colar o prompt, o Resumator aguarda 2 segundos antes de anexar o primeiro PDF.
 
-No modo "Documento DOCX", o Resumator cria um DOCX temporario com o prompt e anexa esse arquivo junto dos PDFs.
+Quando ha mais de um PDF, o Resumator aguarda 3 segundos apos cada anexo antes de iniciar o proximo.
 
-No Microsoft 365 Copilot, o Resumator 11.0 sempre abre um novo chat por solicitacao, cola o prompt como texto e anexa apenas os PDFs selecionados. Se o seletor de arquivos nao for confirmado, o envio fica pausado para conferencia.
+No modo "Documento DOCX", o Resumator cola o prompt como texto, cria um DOCX temporario com o prompt e anexa esse DOCX antes dos PDFs.
+
+No Microsoft 365 Copilot, o Resumator 11.2 sempre abre um novo chat por solicitacao, cola o prompt como texto e anexa apenas os PDFs selecionados. Se o seletor de arquivos nao for confirmado, o envio fica pausado para conferencia.
 
 Copilot, Gemini e DeepSeek podem mudar a interface. Quando o botao de anexo nao for encontrado pelo Windows UI Automation, o Resumator tenta alternativas de anexo e mantem o envio pausado para conferencia quando necessario.
 
-A captura automatica procura o botao "Copiar" da resposta mais recente. Quando o clipboard da IA fornece HTML, o Resumator preserva essa formatacao para exportar DOCX e PDF. A integracao com QUIMERA e a exportacao JSON continuam usando texto sem formatacao.
+A captura automatica bloqueia o mouse por 5 segundos e procura o botao "Copiar" da resposta mais recente. No Gemini, a busca tenta revelar os botoes da ultima resposta e repete algumas vezes, pois a interface pode ocultar o botao enquanto a resposta ainda esta em geracao. Quando o clipboard da IA fornece HTML, o Resumator preserva essa formatacao para exportar DOCX e PDF, ignorando blocos tecnicos como CSS do Copilot. A integracao com QUIMERA e a exportacao JSON continuam usando texto sem formatacao.
+
+PDF e DOCX exportados usam o formato `Resumator_(numero do processo)_(IA)`, por exemplo `Resumator_0154064-23.2015.4.02.5117_Copilot.docx`.
 
 ## Integracao com QUIMERA
 
-O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 11.0. A exportacao manual em JSON continua disponivel como alternativa.
+O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualizado junto com o Resumator 11.2. A exportacao manual em JSON continua disponivel como alternativa.
 
 ## Arquivos principais
 
@@ -94,16 +99,16 @@ O botao direto usa o argumento --summary-file do QUIMERA. Use o QUIMERA atualiza
 Aplicativo:
 
 ```powershell
-python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 11.0.spec"
+python -m PyInstaller --noconfirm --clean --distpath dist-py314 --workpath build-py314 "Resumator 11.2.spec"
 ```
 
 Instalador:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installeruild_setup.ps1
+powershell -ExecutionPolicy Bypass -File installer\build_setup.ps1
 ```
 
 Artefatos esperados:
 
-- `dist-py314\Resumator 11.0\Resumator 11.0.exe`
-- `dist-py314\Resumator 11.0 Setup.exe`
+- `dist-py314\Resumator 11.2\Resumator 11.2.exe`
+- `dist-py314\Resumator 11.2 Setup.exe`

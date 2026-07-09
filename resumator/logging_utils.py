@@ -7,7 +7,7 @@ import traceback
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
-LOG_PATH = APP_DIR / "resumator-11.0.log"
+LOG_PATH = APP_DIR / "resumator-11.2.log"
 
 
 def write_log(message: str) -> None:
@@ -27,7 +27,7 @@ def write_exception(context: str, exc: BaseException) -> None:
 
 def collect_logs(extra_paths: list[Path] | None = None) -> str:
     lines = [
-        "LOGS DO RESUMATOR 10",
+        "LOGS DO RESUMATOR 11.2",
         f"Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
         f"Pasta do aplicativo: {APP_DIR}",
         "",
@@ -61,3 +61,4 @@ def collect_logs(extra_paths: list[Path] | None = None) -> str:
         lines.append("Nenhum arquivo de log foi encontrado.")
 
     return "\n".join(lines).strip() + "\n"
+

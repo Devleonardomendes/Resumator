@@ -15,6 +15,7 @@ import threading
 from .chatgpt_desktop import (
     assistant_display_name,
     capture_latest_response_from_assistant,
+    get_clipboard_html,
     get_clipboard_text,
     open_desktop_assistant,
     send_to_desktop_assistant,
@@ -34,9 +35,9 @@ from .solicitador_bridge import SolicitadorExportResult, export_summary_to_solic
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 DATA_DIR = APP_DIR / "data"
 PROMPTS_PATH = DATA_DIR / "prompts.json"
-SESSION_PATH = DATA_DIR / "session-resumator-11.0.json"
+SESSION_PATH = DATA_DIR / "session-resumator-11.2.json"
 OUTPUT_DIR = APP_DIR / "saidas"
-APP_TITLE = "Resumator 11.0"
+APP_TITLE = "Resumator 11.2"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 MAX_PDF_FILES = 10
 DELIVERY_TEXT = "text"
@@ -55,12 +56,20 @@ IGNORE_TIME_LIMIT_INSTRUCTION = (
     "podendo pensar pelo tempo suficiente para que a resposta seja enviada em até 30 (trinta) minutos."
 )
 RESPONSE_DOCX_ASSISTANTS = {"chatgpt", "copilot"}
+ASSISTANT_EXPORT_NAMES = {
+    "chatgpt": "ChatGPT",
+    "copilot": "Copilot",
+    "gemini": "Gemini",
+    "lmstudio_desktop": "LMStudio",
+    "deepseek": "Deepseek",
+}
 MOUSE_SUSPEND_NOTICE = (
     "Aguarde enquanto o sistema se conecta ou envia à IA. Caso a anexação ou o envio falhe, "
     "faça de forma manual, diretamente no chat da IA."
 )
-ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS = 10
-LMSTUDIO_SELECTION_MOUSE_SUSPEND_SECONDS = 30
+ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS = 5
+LMSTUDIO_SELECTION_MOUSE_SUSPEND_SECONDS = 15
+CAPTURE_MOUSE_SUSPEND_SECONDS = 5
 SEND_MOUSE_SUSPEND_UNTIL_UPLOAD_STATUS = "mouse suspenso até a conclusão do último upload de PDF"
 WH_MOUSE_LL = 14
 HC_ACTION = 0
@@ -120,9 +129,19 @@ def _initialize_tcl_runtime() -> None:
 
 _initialize_tcl_runtime()
 
+for _vendor_dir in (APP_DIR / "vendor", Path(__file__).resolve().parents[1] / "vendor"):
+    if _vendor_dir.exists():
+        sys.path.insert(0, str(_vendor_dir))
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
+except Exception:  # pragma: no cover - optional desktop dependency
+    DND_FILES = None
+    TkinterDnD = None
 
 
 def _resource_path(*parts: str) -> Path:
@@ -177,10 +196,14 @@ class ResumatorApp:
         self.attach_var = tk.BooleanVar(value=True)
         self.submit_var = tk.BooleanVar(value=False)
         self.ignore_time_limit_var = tk.BooleanVar(value=False)
+        self.process_number_var.trace_add("write", lambda *_: self._on_process_number_changed())
         self.pdf_path_vars: list[tk.StringVar] = []
+        self.prompt_controls: list[tk.Widget] = []
+        self.assistant_radios: dict[str, ttk.Radiobutton] = {}
         self.add_pdf_buttons: list[ttk.Button] = []
         self.clear_pdf_buttons: list[ttk.Button] = []
         self.pdf_rows_frame: ttk.Frame | None = None
+        self._dnd_warning_logged = False
         self._mouse_suspend_active = False
         self._status_after_mouse_suspend: str | None = None
         self._mouse_suspend_generation = 0
@@ -265,7 +288,8 @@ class ResumatorApp:
         ttk.Label(frame, text="Nº do processo administrativo/judicial").grid(
             row=0, column=0, sticky="w", padx=(0, 8)
         )
-        ttk.Entry(frame, textvariable=self.process_number_var).grid(row=0, column=1, sticky="ew")
+        self.process_entry = ttk.Entry(frame, textvariable=self.process_number_var)
+        self.process_entry.grid(row=0, column=1, sticky="ew")
 
     def _build_prompt_section(self, parent: ttk.Frame) -> None:
         frame = ttk.LabelFrame(parent, text="Prompt", padding=12)
@@ -277,18 +301,25 @@ class ResumatorApp:
         self.prompt_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         self.prompt_combo.bind("<<ComboboxSelected>>", self._on_prompt_selected)
 
-        ttk.Button(frame, text="Personalizado", command=self._new_prompt).grid(row=0, column=1, padx=2)
-        ttk.Button(frame, text="Assistente", command=self._open_prompt_assistant).grid(row=0, column=2, padx=2)
+        self.new_prompt_button = ttk.Button(frame, text="Personalizado", command=self._new_prompt)
+        self.new_prompt_button.grid(row=0, column=1, padx=2)
+        self.prompt_assistant_button = ttk.Button(frame, text="Assistente", command=self._open_prompt_assistant)
+        self.prompt_assistant_button.grid(row=0, column=2, padx=2)
         self.edit_prompt_button = ttk.Button(frame, text="Editar", command=self._edit_prompt)
         self.edit_prompt_button.grid(row=0, column=3, padx=2)
         self.delete_prompt_button = ttk.Button(frame, text="Excluir", command=self._delete_prompt)
         self.delete_prompt_button.grid(row=0, column=4, padx=2)
-        ttk.Button(frame, text="Importar do Resumator", command=self._import_prompts).grid(
-            row=0, column=5, padx=(8, 0)
-        )
-        ttk.Button(frame, text="Exportar prompts", command=self._export_user_prompts).grid(
-            row=0, column=6, padx=(8, 0)
-        )
+        self.import_prompts_button = ttk.Button(frame, text="Importar do Resumator", command=self._import_prompts)
+        self.import_prompts_button.grid(row=0, column=5, padx=(8, 0))
+        self.export_prompts_button = ttk.Button(frame, text="Exportar prompts", command=self._export_user_prompts)
+        self.export_prompts_button.grid(row=0, column=6, padx=(8, 0))
+        self.prompt_controls = [
+            self.prompt_combo,
+            self.new_prompt_button,
+            self.prompt_assistant_button,
+            self.import_prompts_button,
+            self.export_prompts_button,
+        ]
 
         ttk.Label(frame, text="Texto do prompt").grid(row=1, column=0, columnspan=7, sticky="w", pady=(10, 4))
         self.prompt_description_text = ScrolledText(frame, wrap="word", height=5, font=("Segoe UI", 9))
@@ -311,48 +342,54 @@ class ResumatorApp:
         frame.columnconfigure(7, weight=1)
 
         ttk.Label(frame, text="Destino:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Radiobutton(
+        self.assistant_radios["none"] = ttk.Radiobutton(
             frame,
             text="Nenhum",
             variable=self.assistant_var,
             value="none",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.assistant_radios["none"].grid(row=0, column=1, sticky="w", padx=(0, 12))
+        self.assistant_radios["chatgpt"] = ttk.Radiobutton(
             frame,
             text="ChatGPT Desktop",
             variable=self.assistant_var,
             value="chatgpt",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=2, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.assistant_radios["chatgpt"].grid(row=0, column=2, sticky="w", padx=(0, 12))
+        self.assistant_radios["copilot"] = ttk.Radiobutton(
             frame,
             text="Microsoft 365 Copilot",
             variable=self.assistant_var,
             value="copilot",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=3, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.assistant_radios["copilot"].grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self.assistant_radios["gemini"] = ttk.Radiobutton(
             frame,
             text="Google Gemini",
             variable=self.assistant_var,
             value="gemini",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=4, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.assistant_radios["gemini"].grid(row=0, column=4, sticky="w", padx=(0, 12))
+        self.assistant_radios["lmstudio_desktop"] = ttk.Radiobutton(
             frame,
             text="LM Studio Desktop",
             variable=self.assistant_var,
             value="lmstudio_desktop",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=5, sticky="w", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.assistant_radios["lmstudio_desktop"].grid(row=0, column=5, sticky="w", padx=(0, 12))
+        self.assistant_radios["deepseek"] = ttk.Radiobutton(
             frame,
             text="DeepSeek",
             variable=self.assistant_var,
             value="deepseek",
             command=self._on_assistant_selected,
-        ).grid(row=0, column=6, sticky="w", padx=(0, 12))
+        )
+        self.assistant_radios["deepseek"].grid(row=0, column=6, sticky="w", padx=(0, 12))
 
         ttk.Label(frame, text="Envio:").grid(row=1, column=0, sticky="w", pady=(8, 0), padx=(0, 8))
         self.delivery_text_radio = ttk.Radiobutton(
@@ -479,6 +516,66 @@ class ResumatorApp:
             row=0, column=0, sticky="w"
         )
 
+    def _process_number_is_filled(self) -> bool:
+        return bool(self.process_number_var.get().strip())
+
+    def _ensure_process_number_before_prompt(self) -> bool:
+        if self._process_number_is_filled():
+            return True
+        messagebox.showwarning(
+            APP_TITLE,
+            "Informe o número do processo administrativo/judicial antes de escolher o prompt.",
+        )
+        self._set_status("Escolha de prompt bloqueada até informar o número do processo.")
+        return False
+
+    def _on_process_number_changed(self) -> None:
+        if not hasattr(self, "prompt_combo"):
+            return
+        if not self._process_number_is_filled():
+            self.selected_prompt_id = None
+            self.transient_prompt_name = None
+            self.transient_prompt_content = None
+            self.prompt_var.set("")
+            if hasattr(self, "prompt_description_text"):
+                self._set_prompt_description(None)
+            if self.assistant_var.get() != "none":
+                self.assistant_var.set("none")
+        self._refresh_flow_controls()
+
+    def _refresh_flow_controls(self) -> None:
+        self._refresh_prompt_controls()
+        if hasattr(self, "send_button"):
+            self._refresh_send_button()
+
+    def _refresh_prompt_controls(self) -> None:
+        process_ready = self._process_number_is_filled()
+        for control in self.prompt_controls:
+            if control is self.prompt_combo:
+                control.configure(state="readonly" if process_ready else "disabled")
+            else:
+                control.configure(state="normal" if process_ready else "disabled")
+        self._refresh_prompt_actions()
+
+    def _can_choose_assistant(self) -> bool:
+        return (
+            self._process_number_is_filled()
+            and self._selected_prompt() is not None
+            and bool(self.pdf_paths)
+            and all(path.exists() for path in self.pdf_paths)
+        )
+
+    def _refresh_assistant_radio_states(self) -> None:
+        can_choose_assistant = self._can_choose_assistant()
+        for key, radio in self.assistant_radios.items():
+            radio.configure(state="normal" if key == "none" or can_choose_assistant else "disabled")
+
+    def _reset_assistant_if_prerequisites_missing(self) -> bool:
+        if self._can_choose_assistant() or self.assistant_var.get() == "none":
+            return False
+        self.assistant_var.set("none")
+        return True
+
     def _reload_prompts(self, keep_id: str | None = None) -> None:
         self.prompts = self.store.all()
         self.prompt_combo["values"] = [self._prompt_label(prompt) for prompt in self.prompts]
@@ -487,6 +584,13 @@ class ResumatorApp:
             self.prompt_var.set("")
             self._set_prompt_description(None)
             self._refresh_prompt_actions()
+            return
+
+        if not self._process_number_is_filled():
+            self.selected_prompt_id = None
+            self.prompt_var.set("")
+            self._set_prompt_description(None)
+            self._refresh_flow_controls()
             return
 
         selected = next(
@@ -500,9 +604,12 @@ class ResumatorApp:
         self.selected_prompt_id = selected.id
         self.prompt_var.set(self._prompt_label(selected))
         self._set_prompt_description(selected)
-        self._refresh_prompt_actions()
+        self._refresh_flow_controls()
 
     def _on_prompt_selected(self, _: tk.Event) -> None:
+        if not self._ensure_process_number_before_prompt():
+            self.prompt_combo.set("")
+            return
         index = self.prompt_combo.current()
         if index < 0 or index >= len(self.prompts):
             return
@@ -511,7 +618,7 @@ class ResumatorApp:
         self.transient_prompt_content = None
         self.selected_prompt_id = prompt.id
         self._set_prompt_description(prompt)
-        self._refresh_prompt_actions()
+        self._refresh_flow_controls()
 
     def _selected_prompt(self) -> Prompt | None:
         if self.transient_prompt_content:
@@ -537,7 +644,7 @@ class ResumatorApp:
 
     def _refresh_prompt_actions(self) -> None:
         prompt = self.store.get(self.selected_prompt_id) if self.selected_prompt_id else None
-        state = "normal" if prompt is not None else "disabled"
+        state = "normal" if prompt is not None and self._process_number_is_filled() else "disabled"
         self.edit_prompt_button.configure(state=state)
         self.delete_prompt_button.configure(state=state)
 
@@ -573,6 +680,7 @@ class ResumatorApp:
 
             entry = ttk.Entry(self.pdf_rows_frame, textvariable=path_var, state="readonly")
             entry.grid(row=row_index, column=0, sticky="ew", padx=(0, 8), pady=(0, 6))
+            self._register_pdf_drop_target(entry, row_index)
 
             add_button = ttk.Button(
                 self.pdf_rows_frame,
@@ -580,6 +688,7 @@ class ResumatorApp:
                 command=lambda index=row_index: self._select_pdf(index),
             )
             add_button.grid(row=row_index, column=1, padx=(0, 6), pady=(0, 6))
+            self._register_pdf_drop_target(add_button, row_index)
             self.add_pdf_buttons.append(add_button)
 
             clear_button = ttk.Button(
@@ -590,12 +699,108 @@ class ResumatorApp:
             clear_button.grid(row=row_index, column=2, pady=(0, 6))
             self.clear_pdf_buttons.append(clear_button)
 
-        self._refresh_pdf_controls()
+        if hasattr(self, "send_button"):
+            self._refresh_send_button()
+        else:
+            self._refresh_pdf_controls()
 
-    def _apply_default_response_mode_for_assistant(self, assistant_key: str) -> None:
-        if assistant_key in RESPONSE_DOCX_ASSISTANTS:
-            self.response_mode_var.set(RESPONSE_TEXT_AND_DOCX)
+    def _register_pdf_drop_target(self, widget: tk.Widget, row_index: int) -> None:
+        if DND_FILES is None or not hasattr(widget, "drop_target_register"):
             return
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", lambda event, index=row_index: self._handle_pdf_drop(event, index))
+        except Exception as exc:  # noqa: BLE001 - drag and drop is optional
+            if not self._dnd_warning_logged:
+                write_exception("Falha ao habilitar arrastar e soltar de PDFs", exc)
+                self._dnd_warning_logged = True
+
+    def _handle_pdf_drop(self, event: tk.Event, row_index: int) -> str:
+        if self.assistant_var.get() != "none":
+            messagebox.showwarning(
+                APP_TITLE,
+                "Para adicionar PDFs, selecione 'Nenhum' no destino de IA.",
+            )
+            self._set_status("Adição de PDFs bloqueada após a escolha da IA.")
+            return "break"
+
+        raw_data = getattr(event, "data", "")
+        dropped_paths = self._parse_dropped_pdf_paths(str(raw_data or ""))
+        if not dropped_paths:
+            messagebox.showwarning(APP_TITLE, "Arraste apenas arquivos PDF válidos.")
+            return "break"
+
+        self._add_pdf_paths(dropped_paths, row_index)
+        return "break"
+
+    def _parse_dropped_pdf_paths(self, raw_data: str) -> list[Path]:
+        if not raw_data.strip():
+            return []
+        try:
+            items = self.root.tk.splitlist(raw_data)
+        except tk.TclError:
+            items = raw_data.split()
+
+        pdf_paths: list[Path] = []
+        for item in items:
+            path = Path(str(item).strip())
+            if path.suffix.casefold() != ".pdf" or not path.exists():
+                continue
+            pdf_paths.append(path)
+        return pdf_paths
+
+    def _add_pdf_paths(self, selected_paths: list[Path], row_index: int | None = None) -> None:
+        if not selected_paths:
+            return
+
+        added = 0
+        updated = 0
+        skipped_duplicates = 0
+        skipped_limit = 0
+        target_index = len(self.pdf_paths) if row_index is None else row_index
+
+        for offset, selected_path in enumerate(selected_paths):
+            current_index = target_index if offset == 0 else len(self.pdf_paths)
+            if current_index >= MAX_PDF_FILES:
+                skipped_limit += 1
+                continue
+
+            selected_key = _path_selection_key(selected_path)
+            duplicated = any(
+                index != current_index and _path_selection_key(existing_path) == selected_key
+                for index, existing_path in enumerate(self.pdf_paths)
+            )
+            if duplicated:
+                skipped_duplicates += 1
+                continue
+
+            if current_index < len(self.pdf_paths):
+                self.pdf_paths[current_index] = selected_path
+                updated += 1
+            else:
+                self.pdf_paths.append(selected_path)
+                added += 1
+
+        self.pdf_paths = _deduplicate_paths(self.pdf_paths)[:MAX_PDF_FILES]
+        self._render_pdf_rows()
+
+        details = []
+        if added:
+            details.append(f"{added} adicionado(s)")
+        if updated:
+            details.append(f"{updated} atualizado(s)")
+        if skipped_duplicates:
+            details.append(f"{skipped_duplicates} duplicado(s) ignorado(s)")
+        if skipped_limit:
+            details.append(f"{skipped_limit} acima do limite ignorado(s)")
+        if not details:
+            details.append("nenhum PDF alterado")
+        self._set_status(f"{len(self.pdf_paths)} PDF(s) selecionado(s): {', '.join(details)}.")
+
+    def _apply_default_modes_for_assistant(self, assistant_key: str) -> None:
+        if assistant_key != "none":
+            self.delivery_mode_var.set(DELIVERY_TEXT)
+            self.submit_var.set(False)
         self.response_mode_var.set(RESPONSE_TEXT_ONLY)
 
     def _refresh_response_mode_controls(self, assistant_key: str) -> None:
@@ -619,15 +824,23 @@ class ResumatorApp:
         self._refresh_response_mode_controls(self.assistant_var.get())
 
     def _refresh_send_button(self) -> None:
+        prerequisites_reset = self._reset_assistant_if_prerequisites_missing()
         assistant_key = self.assistant_var.get()
+        self._refresh_assistant_radio_states()
         self._refresh_delivery_controls(assistant_key)
         self._refresh_response_mode_controls(assistant_key)
         self._refresh_pdf_controls(assistant_key)
         if assistant_key == "none":
-            self.send_button.configure(text="Escolha um destino", state="disabled")
+            if self._can_choose_assistant():
+                button_text = "Escolha um destino"
+            else:
+                button_text = "Informe processo, prompt e PDF"
+            self.send_button.configure(text=button_text, state="disabled")
             self.attach_check.configure(state="disabled")
             self.submit_check.configure(state="disabled")
             self.ignore_time_limit_check.configure(state="disabled")
+            if prerequisites_reset:
+                self._set_status("Destino de IA redefinido: informe processo, prompt e PDF antes de escolher a IA.")
             return
         if assistant_key == "lmstudio_desktop":
             self.send_button.configure(text="Enviar ao LM Studio", state="normal")
@@ -674,7 +887,16 @@ class ResumatorApp:
 
     def _on_assistant_selected(self) -> None:
         selected_assistant = self.assistant_var.get()
-        self._apply_default_response_mode_for_assistant(selected_assistant)
+        if selected_assistant != "none" and not self._can_choose_assistant():
+            self.assistant_var.set("none")
+            self._refresh_send_button()
+            messagebox.showwarning(
+                APP_TITLE,
+                "Escolha um prompt e adicione ao menos um PDF válido antes de escolher a IA.",
+            )
+            self._set_status("Escolha de IA bloqueada até selecionar prompt e PDF.")
+            return
+        self._apply_default_modes_for_assistant(selected_assistant)
         self._refresh_send_button()
         assistant_key = self._desktop_assistant_key(selected_assistant)
         if assistant_key is None:
@@ -712,6 +934,8 @@ class ResumatorApp:
             self._show_system_error(result.message + detail)
 
     def _new_prompt(self) -> None:
+        if not self._ensure_process_number_before_prompt():
+            return
         editor = PromptEditor(self.root, title="Prompt personalizado")
         result = editor.show()
         if result is None:
@@ -721,6 +945,8 @@ class ResumatorApp:
         self._set_status("Prompt criado.")
 
     def _open_prompt_assistant(self) -> None:
+        if not self._ensure_process_number_before_prompt():
+            return
         assistant = PromptAssistantDialog(self.root)
         result = assistant.show()
         if result is None:
@@ -741,10 +967,12 @@ class ResumatorApp:
         self.transient_prompt_content = prompt_text
         self.prompt_combo.set(f"{prompt_name} (não salvo)")
         self._set_prompt_description(self._selected_prompt())
-        self._refresh_prompt_actions()
+        self._refresh_flow_controls()
         self._set_status("Prompt montado pelo Assistente.")
 
     def _edit_prompt(self) -> None:
+        if not self._ensure_process_number_before_prompt():
+            return
         prompt = self._selected_prompt()
         if prompt is None:
             messagebox.showwarning(APP_TITLE, "Selecione um prompt para editar.")
@@ -763,6 +991,8 @@ class ResumatorApp:
         self._set_status("Prompt atualizado.")
 
     def _delete_prompt(self) -> None:
+        if not self._ensure_process_number_before_prompt():
+            return
         prompt = self._selected_prompt()
         if prompt is None:
             messagebox.showwarning(APP_TITLE, "Selecione um prompt para excluir.")
@@ -784,6 +1014,8 @@ class ResumatorApp:
         self._set_status("Prompt excluido.")
 
     def _import_prompts(self) -> None:
+        if not self._ensure_process_number_before_prompt():
+            return
         source_paths = self._default_resumator_prompts_paths()
         if not source_paths:
             selected = filedialog.askopenfilename(
@@ -830,7 +1062,9 @@ class ResumatorApp:
         self._set_status(f"Prompts importados: {total_imported}. Ignorados: {total_skipped}.")
 
     def _export_user_prompts(self) -> None:
-        default_name = f"prompts-resumator-11.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        if not self._ensure_process_number_before_prompt():
+            return
+        default_name = f"prompts-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Exportar todos os prompts",
             defaultextension=".json",
@@ -900,32 +1134,7 @@ class ResumatorApp:
         if not selected:
             return
 
-        selected_path = Path(selected)
-        target_index = len(self.pdf_paths) if row_index is None else row_index
-        if target_index >= MAX_PDF_FILES:
-            messagebox.showwarning(
-                APP_TITLE,
-                f"Selecione no máximo {MAX_PDF_FILES} arquivos PDF.",
-            )
-            return
-
-        selected_key = _path_selection_key(selected_path)
-        for index, existing_path in enumerate(self.pdf_paths):
-            if index == target_index:
-                continue
-            if _path_selection_key(existing_path) == selected_key:
-                messagebox.showwarning(APP_TITLE, "Este PDF já foi adicionado.")
-                return
-
-        if target_index < len(self.pdf_paths):
-            self.pdf_paths[target_index] = selected_path
-            action = "atualizado"
-        else:
-            self.pdf_paths.append(selected_path)
-            action = "adicionado"
-        self.pdf_paths = _deduplicate_paths(self.pdf_paths)
-        self._render_pdf_rows()
-        self._set_status(f"{len(self.pdf_paths)} PDF(s) selecionado(s). PDF {action}.")
+        self._add_pdf_paths([Path(selected)], row_index)
 
     def _clear_pdf_selection(self, row_index: int | None = None) -> None:
         if row_index is None:
@@ -939,6 +1148,9 @@ class ResumatorApp:
         self._render_pdf_rows()
 
     def _send_to_assistant(self) -> None:
+        if not self._process_number_is_filled():
+            messagebox.showwarning(APP_TITLE, "Informe o número do processo antes de enviar à IA.")
+            return
         prompt = self._selected_prompt()
         if prompt is None:
             messagebox.showwarning(APP_TITLE, "Crie ou selecione um prompt antes de enviar.")
@@ -1023,10 +1235,10 @@ class ResumatorApp:
         return instruction_text
 
     def _create_prompt_document(self, prompt: Prompt, pdf_paths: list[Path], prompt_text: str) -> Path:
-        output_dir = Path(tempfile.gettempdir()) / "resumator-11.0-envios"
+        output_dir = Path(tempfile.gettempdir()) / "resumator-11.2-envios"
         output_path = _unique_output_path(
             output_dir,
-            f"prompt-ia-resumator-11.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            f"prompt-ia-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             ".docx",
         )
         return export_prompt_docx(
@@ -1046,7 +1258,7 @@ class ResumatorApp:
         delivery_action = (
             "colar o prompt como texto"
             if delivery_mode == DELIVERY_TEXT
-            else "anexar o prompt em um documento DOCX"
+            else "colar o prompt como texto e anexar uma copia DOCX do prompt"
         )
         submit_action = "pressionar Enter ao final" if self.submit_var.get() else "deixar o envio pausado"
         return messagebox.askyesno(
@@ -1095,7 +1307,7 @@ class ResumatorApp:
         delivery_mode: str,
         prompt_document_path: Path | None,
     ) -> None:
-        paste_prompt_text = delivery_mode == DELIVERY_TEXT
+        paste_prompt_text = True
         if assistant_key == "lmstudio_desktop":
             result = send_to_desktop_assistant(
                 "lmstudio",
@@ -1154,6 +1366,7 @@ class ResumatorApp:
             self._set_status("Captura automática cancelada pelo usuario.")
             return
 
+        self._begin_mouse_suspend(CAPTURE_MOUSE_SUSPEND_SECONDS)
         self._set_status(f"Capturando resposta do {assistant_name}...")
         threading.Thread(
             target=self._capture_assistant_response_worker,
@@ -1182,14 +1395,18 @@ class ResumatorApp:
     def _capture_clipboard(self) -> None:
         try:
             text = get_clipboard_text().strip()
+            rich_html = get_clipboard_html()
         except Exception as exc:  # noqa: BLE001 - surfaced to user
             self._show_system_error(f"Não foi possível ler a área de transferência: {exc}")
             return
         if not text:
             messagebox.showwarning(APP_TITLE, "A área de transferência não contém texto.")
             return
-        self._set_response_text(text)
-        self._set_status("Resposta capturada da área de transferência.")
+        self._set_response_text(text, rich_html)
+        status = "Resposta capturada da área de transferência."
+        if rich_html:
+            status += " Formatação HTML preservada para DOCX/PDF."
+        self._set_status(status)
 
     def _clear_response(self) -> None:
         self._set_response_text("")
@@ -1285,7 +1502,7 @@ class ResumatorApp:
         assistant = str(payload.get("assistant") or "none")
         if assistant not in {"none", "chatgpt", "copilot", "gemini", "lmstudio_desktop", "deepseek"}:
             assistant = "none"
-        self.assistant_var.set(assistant)
+        restored_assistant = assistant
 
         delivery_mode = str(payload.get("delivery_mode") or DELIVERY_TEXT)
         self.delivery_mode_var.set(delivery_mode if delivery_mode in {DELIVERY_TEXT, DELIVERY_DOCX} else DELIVERY_TEXT)
@@ -1319,6 +1536,7 @@ class ResumatorApp:
         self.last_output_path = Path(last_output) if isinstance(last_output, str) and last_output.strip() else None
 
         self._restore_session_prompt(payload)
+        self.assistant_var.set(restored_assistant if restored_assistant == "none" or self._can_choose_assistant() else "none")
         self._refresh_send_button()
 
     def _restore_session_prompt(self, payload: dict) -> None:
@@ -1426,7 +1644,27 @@ class ResumatorApp:
                 "O número do processo informado não gera um nome de arquivo válido.",
             )
             return None
-        return f"Resumator-{safe_process_number}"
+
+        assistant_label = self._assistant_export_label()
+        if assistant_label is None:
+            return None
+        return f"Resumator_{safe_process_number}_{assistant_label}"
+
+    def _assistant_export_label(self) -> str | None:
+        assistant_key = self.assistant_var.get()
+        label = ASSISTANT_EXPORT_NAMES.get(assistant_key)
+        if not label:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Escolha a IA utilizada antes de exportar para que o arquivo seja nomeado corretamente.",
+            )
+            self._set_status("Exportação bloqueada até escolher a IA utilizada.")
+            return None
+        safe_label = _sanitize_filename_token(label)
+        if not safe_label:
+            messagebox.showwarning(APP_TITLE, "O nome da IA não gera um nome de arquivo válido.")
+            return None
+        return safe_label
 
     def _export_to_solicitador(self) -> None:
         text = self.response_text.get("1.0", "end").strip()
@@ -1515,7 +1753,7 @@ class ResumatorApp:
         messagebox.showinfo(APP_TITLE, "DOCX importado e exportado como PDF.")
 
     def _export_logs_txt(self) -> None:
-        default_name = f"logs-resumator-11.0-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        default_name = f"logs-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         path = filedialog.asksaveasfilename(
             title="Salvar logs em TXT",
             defaultextension=".txt",
@@ -1819,6 +2057,13 @@ def _sanitize_process_number_for_filename(process_number: str) -> str:
     cleaned = cleaned.translate(str.maketrans({char: "-" for char in '<>:"/\\|?*'}))
     cleaned = re.sub(r"[-\s]+", "-", cleaned)
     return cleaned.strip(" .-")
+
+
+def _sanitize_filename_token(value: str) -> str:
+    cleaned = " ".join(value.strip().split())
+    cleaned = cleaned.translate(str.maketrans({char: "" for char in '<>:"/\\|?*'}))
+    cleaned = re.sub(r"\s+", "", cleaned)
+    return cleaned.strip(" ._-")
 
 
 def _enforce_export_filename(selected_path: Path, filename: str) -> Path:
@@ -2251,10 +2496,11 @@ class PromptEditor:
 
 def main() -> None:
     _initialize_tcl_runtime()
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
     app = ResumatorApp(root)
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+

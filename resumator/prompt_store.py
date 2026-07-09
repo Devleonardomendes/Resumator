@@ -174,7 +174,7 @@ class PromptStore:
         user_prompts = self.all()
         payload = {
             "version": 3,
-            "source": "Resumator 11.0",
+            "source": "Resumator 11.2",
             "exported_at": _now(),
             "prompts": [asdict(prompt) for prompt in user_prompts],
         }
@@ -230,3 +230,4 @@ class PromptStore:
         payload = asdict(prompt)
         payload["protected"] = False
         return payload
+
