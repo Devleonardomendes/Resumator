@@ -11,14 +11,14 @@ import winreg
 import zipfile
 
 
-APP_NAME = "Resumator 11.2"
-APP_VERSION = "11.2"
+APP_NAME = "Resumator 11.3"
+APP_VERSION = "11.3"
 PUBLISHER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES"
-INSTALLED_EXE = "Resumator 11.2.exe"
-PAYLOAD_APP_ZIP = "Resumator11.2-app.zip"
+INSTALLED_EXE = "Resumator 11.3.exe"
+PAYLOAD_APP_ZIP = "Resumator11.3-app.zip"
 PAYLOAD_PROMPTS = "prompts.json"
 PAYLOAD_README = "README.txt"
-UNINSTALL_SCRIPT = "uninstall_resumator11.2.ps1"
+UNINSTALL_SCRIPT = "uninstall_resumator11.3.ps1"
 UNINSTALL_REG_PATH = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_NAME}"
 
 
@@ -46,10 +46,10 @@ def _create_shortcuts(target: Path) -> None:
         "$launcher=Join-Path $env:WINDIR 'explorer.exe'; "
         "$quotedTarget=[char]34 + $target + [char]34; "
         "$shell=New-Object -ComObject WScript.Shell; "
-        "$shortcut=$shell.CreateShortcut((Join-Path $desktop 'Resumator 11.2.lnk')); "
+        "$shortcut=$shell.CreateShortcut((Join-Path $desktop 'Resumator 11.3.lnk')); "
         "$shortcut.TargetPath=$launcher; $shortcut.Arguments=$quotedTarget; "
         "$shortcut.WorkingDirectory=$workdir; $shortcut.IconLocation=$target; $shortcut.Save(); "
-        "$shortcut=$shell.CreateShortcut((Join-Path $programs 'Resumator 11.2.lnk')); "
+        "$shortcut=$shell.CreateShortcut((Join-Path $programs 'Resumator 11.3.lnk')); "
         "$shortcut.TargetPath=$launcher; $shortcut.Arguments=$quotedTarget; "
         "$shortcut.WorkingDirectory=$workdir; $shortcut.IconLocation=$target; $shortcut.Save()"
     )
@@ -79,7 +79,7 @@ def _ps_single_quote(value: str) -> str:
 
 def _create_uninstaller(destination_dir: Path) -> Path:
     uninstaller = destination_dir / UNINSTALL_SCRIPT
-    cleanup_name = "resumator11.2-cleanup.cmd"
+    cleanup_name = "resumator11.3-cleanup.cmd"
     script = f"""$ErrorActionPreference = 'SilentlyContinue'
 $appName = {_ps_single_quote(APP_NAME)}
 $installDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -188,7 +188,7 @@ def main() -> int:
 
 def self_test() -> int:
     source = _resource_path(PAYLOAD_APP_ZIP)
-    output_dir = Path(tempfile.gettempdir()) / "resumator-11.2-setup-self-test"
+    output_dir = Path(tempfile.gettempdir()) / "resumator-11.3-setup-self-test"
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "diagnostic.txt").write_text(
         f"source={source}\nexists={source.exists()}\nsize={source.stat().st_size if source.exists() else 0}\n",

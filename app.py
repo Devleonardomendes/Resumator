@@ -10,7 +10,7 @@ from resumator.ui import main
 
 
 def self_test() -> int:
-    output_dir = Path(tempfile.gettempdir()) / "resumator-11.2-self-test"
+    output_dir = Path(tempfile.gettempdir()) / "resumator-11.3-self-test"
     output_dir.mkdir(parents=True, exist_ok=True)
     diagnostic_path = output_dir / "diagnostic.txt"
 
@@ -22,7 +22,7 @@ def self_test() -> int:
     mark("exporting-pdf")
     export_response_pdf(
         output_dir / "self-test.pdf",
-        "Teste automatizado do Resumator 11.2.",
+        "Teste automatizado do Resumator 11.3.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("exporting-formatted-pdf")
@@ -41,7 +41,7 @@ def self_test() -> int:
     mark("exporting-docx")
     export_response_docx(
         output_dir / "self-test.docx",
-        "Teste automatizado do Resumator 11.2.",
+        "Teste automatizado do Resumator 11.3.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("exporting-docx-fallback")
@@ -52,7 +52,7 @@ def self_test() -> int:
         pdf_export_module.Pt = None
         export_response_docx(
             output_dir / "self-test-fallback.docx",
-            "Teste automatizado do fallback DOCX do Resumator 11.2.",
+            "Teste automatizado do fallback DOCX do Resumator 11.3.",
             prompt_name=selected_prompt.name if selected_prompt else None,
         )
     finally:
@@ -60,7 +60,7 @@ def self_test() -> int:
     mark("exporting-json")
     export_response_json(
         output_dir / "self-test.json",
-        "Teste automatizado do Resumator 11.2.",
+        "Teste automatizado do Resumator 11.3.",
         prompt_name=selected_prompt.name if selected_prompt else None,
     )
     mark("checking-prompts")

@@ -35,9 +35,9 @@ from .solicitador_bridge import SolicitadorExportResult, export_summary_to_solic
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 DATA_DIR = APP_DIR / "data"
 PROMPTS_PATH = DATA_DIR / "prompts.json"
-SESSION_PATH = DATA_DIR / "session-resumator-11.2.json"
+SESSION_PATH = DATA_DIR / "session-resumator-11.3.json"
 OUTPUT_DIR = APP_DIR / "saidas"
-APP_TITLE = "Resumator 11.2"
+APP_TITLE = "Resumator 11.3"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 MAX_PDF_FILES = 10
 DELIVERY_TEXT = "text"
@@ -352,7 +352,7 @@ class ResumatorApp:
         self.assistant_radios["none"].grid(row=0, column=1, sticky="w", padx=(0, 12))
         self.assistant_radios["chatgpt"] = ttk.Radiobutton(
             frame,
-            text="ChatGPT Desktop",
+            text="ChatGPT Work",
             variable=self.assistant_var,
             value="chatgpt",
             command=self._on_assistant_selected,
@@ -1064,7 +1064,7 @@ class ResumatorApp:
     def _export_user_prompts(self) -> None:
         if not self._ensure_process_number_before_prompt():
             return
-        default_name = f"prompts-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        default_name = f"prompts-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Exportar todos os prompts",
             defaultextension=".json",
@@ -1235,10 +1235,10 @@ class ResumatorApp:
         return instruction_text
 
     def _create_prompt_document(self, prompt: Prompt, pdf_paths: list[Path], prompt_text: str) -> Path:
-        output_dir = Path(tempfile.gettempdir()) / "resumator-11.2-envios"
+        output_dir = Path(tempfile.gettempdir()) / "resumator-11.3-envios"
         output_path = _unique_output_path(
             output_dir,
-            f"prompt-ia-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            f"prompt-ia-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             ".docx",
         )
         return export_prompt_docx(
@@ -1753,7 +1753,7 @@ class ResumatorApp:
         messagebox.showinfo(APP_TITLE, "DOCX importado e exportado como PDF.")
 
     def _export_logs_txt(self) -> None:
-        default_name = f"logs-resumator-11.2-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        default_name = f"logs-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         path = filedialog.asksaveasfilename(
             title="Salvar logs em TXT",
             defaultextension=".txt",

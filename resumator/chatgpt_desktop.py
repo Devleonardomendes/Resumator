@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import time
+import tomllib
 from typing import Iterable
 
 
@@ -23,6 +24,13 @@ APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
 LOG_PATH = APP_DIR / "resumator-automation.log"
 PROMPT_TO_FIRST_PDF_DELAY_SECONDS = 2.0
 PDF_ATTACHMENT_WAIT_SECONDS = 3.0
+CHATGPT_WORK_AUMID = "OpenAI.Codex_2p2nqsd0c76g0!App"
+CHATGPT_WORK_APPS_FOLDER_TARGET = rf"shell:AppsFolder\{CHATGPT_WORK_AUMID}"
+WINDOWS_EXPLORER_PATH = str(Path(os.environ.get("WINDIR") or r"C:\Windows") / "explorer.exe")
+CHATGPT_WORK_MODE_VALUE = "STEPS_PROSE"
+CHATGPT_WORK_MODE_KEY = "conversationDetailMode"
+CHATGPT_MAIN_WINDOW_TITLES = ("chatgpt", "chatgpt work")
+CHATGPT_AUXILIARY_WINDOW_TERMS = ("dictation", "codex", "debug", "pet surface")
 
 try:
     import win32clipboard  # type: ignore
@@ -133,21 +141,20 @@ class DesktopAssistant:
         "copied",
         "clipboard",
     )
+    composer_terms: tuple[str, ...] = ()
     launch_urls_first: bool = False
 
 
 ASSISTANTS: dict[str, DesktopAssistant] = {
     "chatgpt": DesktopAssistant(
         key="chatgpt",
-        display_name="ChatGPT Desktop",
+        display_name="ChatGPT Work",
         window_keywords=("chatgpt",),
         process_keywords=("chatgpt",),
-        launch_paths=(
-            r"%LOCALAPPDATA%\Programs\ChatGPT\ChatGPT.exe",
-            r"%LOCALAPPDATA%\Microsoft\WindowsApps\ChatGPT.exe",
-            r"C:\Program Files\ChatGPT\ChatGPT.exe",
+        launch_commands=(
+            (WINDOWS_EXPLORER_PATH, CHATGPT_WORK_APPS_FOLDER_TARGET),
         ),
-        launch_urls=("chatgpt://",),
+        require_visible_window=True,
     ),
     "copilot": DesktopAssistant(
         key="copilot",
@@ -193,6 +200,21 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
             "browse",
             "procurar",
         ),
+        composer_terms=(
+            "ask copilot",
+            "message copilot",
+            "pergunte ao copilot",
+            "pergunte ao microsoft 365 copilot",
+            "digite uma mensagem",
+            "escreva uma mensagem",
+            "envie uma mensagem",
+            "type a message",
+            "send a message",
+            "enter a prompt",
+            "insira um prompt",
+            "chat input",
+            "prompt input",
+        ),
         launch_urls_first=True,
     ),
     "gemini": DesktopAssistant(
@@ -210,6 +232,21 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         require_visible_window=True,
         supports_clipboard_file_paste=False,
         supports_file_dialog_attachment=True,
+        composer_terms=(
+            "ask gemini",
+            "message gemini",
+            "pergunte ao gemini",
+            "converse com o gemini",
+            "enter a prompt here",
+            "enter a prompt",
+            "digite uma pergunta",
+            "faca uma pergunta",
+            "faça uma pergunta",
+            "digite uma mensagem",
+            "type a message",
+            "chat input",
+            "prompt input",
+        ),
     ),
     "lmstudio": DesktopAssistant(
         key="lmstudio",
@@ -283,7 +320,17 @@ def open_desktop_assistant(assistant_key: str) -> AutomationResult:
 
     try:
         _activate_assistant_target(target)
+        if assistant.key == "chatgpt":
+            target = _ensure_chatgpt_work_target(assistant, target, notes)
     except Exception as exc:  # noqa: BLE001 - opening is best-effort on selection
+        if assistant.key == "chatgpt":
+            _log_automation(f"{assistant.display_name}: falha ao confirmar o modo Work: {exc!r}")
+            return AutomationResult(
+                False,
+                f"Nao foi possivel abrir e confirmar o ChatGPT Work: {exc}",
+                target.title,
+                notes,
+            )
         notes.append(f"Nao foi possivel trazer a janela para frente: {exc}")
 
     if assistant.key == "lmstudio":
@@ -608,7 +655,7 @@ def _reset_lmstudio_conversation(
 ) -> None:
     conversation.update(
         {
-            "name": "Novo chat Resumator 11.2",
+            "name": "Novo chat Resumator 11.3",
             "pinned": False,
             "createdAt": now_ms,
             "tokenCount": 0,
@@ -1055,7 +1102,7 @@ def find_assistant_windows(assistant_key: str) -> list[tuple[int, str]]:
     except Exception as exc:  # noqa: BLE001 - pywin32 may fail when no desktop windows are visible
         _log_automation(f"{assistant.display_name}: falha no EnumWindows via pywin32: {exc!r}")
         return _find_assistant_windows_ctypes(assistant)
-    return windows
+    return _sort_assistant_windows(windows, assistant)
 
 
 def _find_assistant_windows_ctypes(assistant: DesktopAssistant) -> list[tuple[int, str]]:
@@ -1087,11 +1134,49 @@ def _find_assistant_windows_ctypes(assistant: DesktopAssistant) -> list[tuple[in
         return True
 
     user32.EnumWindows(callback_type(collect), 0)
-    return windows
+    return _sort_assistant_windows(windows, assistant)
+
+
+def _sort_assistant_windows(
+    windows: list[tuple[int, str]],
+    assistant: DesktopAssistant,
+) -> list[tuple[int, str]]:
+    foreground_hwnd = _foreground_window_handle()
+
+    def sort_key(item: tuple[int, str]) -> tuple[int, int, int, int]:
+        hwnd, title = item
+        title_folded = title.strip().casefold()
+        exact_work_title = int(assistant.key == "chatgpt" and title_folded == "chatgpt work")
+        exact_main_title = int(assistant.key != "chatgpt" or title_folded in CHATGPT_MAIN_WINDOW_TITLES)
+        return (
+            int(foreground_hwnd is not None and hwnd == foreground_hwnd),
+            exact_work_title,
+            exact_main_title,
+            _window_area(hwnd),
+        )
+
+    return sorted(windows, key=sort_key, reverse=True)
+
+
+def _window_area(hwnd: int) -> int:
+    try:
+        if win32gui is not None:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        else:
+            rect = wintypes.RECT()
+            user32 = ctypes.windll.user32
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect.restype = wintypes.BOOL
+            if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+                return 0
+            left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+        return max(0, int(right) - int(left)) * max(0, int(bottom) - int(top))
+    except Exception:
+        return 0
 
 
 def _matches_assistant_window(title: str, process_text: str, assistant: DesktopAssistant) -> bool:
-    title_folded = title.casefold()
+    title_folded = title.strip().casefold()
     process_folded = process_text.casefold()
     process_matches = bool(
         process_text
@@ -1099,6 +1184,12 @@ def _matches_assistant_window(title: str, process_text: str, assistant: DesktopA
     )
     if assistant.key == "lmstudio":
         return process_matches
+
+    if assistant.key == "chatgpt":
+        if not title_folded or any(term in title_folded for term in CHATGPT_AUXILIARY_WINDOW_TERMS):
+            return False
+        title_matches = title_folded in CHATGPT_MAIN_WINDOW_TITLES
+        return title_matches and (not process_text or process_matches)
 
     if title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords):
         return True
@@ -1153,7 +1244,104 @@ def _process_text_for_window(hwnd: int) -> str:
     return ""
 
 
+def _chatgpt_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME", "").strip()
+    if codex_home:
+        return Path(os.path.expandvars(codex_home)).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _chatgpt_work_config_text(source: str) -> tuple[str, bool]:
+    newline = "\r\n" if "\r\n" in source else "\n"
+    section_pattern = re.compile(
+        r"(?ms)^[ \t]*\[desktop\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)(.*?)(?=^[ \t]*\[|\Z)"
+    )
+    section_match = section_pattern.search(source)
+    assignment_pattern = re.compile(
+        rf"(?m)^([ \t]*{re.escape(CHATGPT_WORK_MODE_KEY)}[ \t]*=[ \t]*)([^#\r\n]*)([ \t]*(?:#.*)?)$"
+    )
+
+    if section_match:
+        body = section_match.group(1)
+
+        def replace_assignment(match: re.Match[str]) -> str:
+            return f'{match.group(1)}"{CHATGPT_WORK_MODE_VALUE}"{match.group(3)}'
+
+        updated_body, replacements = assignment_pattern.subn(replace_assignment, body)
+        if not replacements:
+            if updated_body and not updated_body.endswith(("\n", "\r")):
+                updated_body += newline
+            updated_body += f'{CHATGPT_WORK_MODE_KEY} = "{CHATGPT_WORK_MODE_VALUE}"{newline}'
+        updated = source[: section_match.start(1)] + updated_body + source[section_match.end(1) :]
+        return updated, updated != source
+
+    prefix = source
+    if prefix and not prefix.endswith(("\n", "\r")):
+        prefix += newline
+    if prefix and not prefix.endswith(newline * 2):
+        prefix += newline
+    updated = prefix + f'[desktop]{newline}{CHATGPT_WORK_MODE_KEY} = "{CHATGPT_WORK_MODE_VALUE}"{newline}'
+    return updated, updated != source
+
+
+def _ensure_chatgpt_work_preference() -> tuple[bool, str]:
+    config_path = _chatgpt_config_path()
+    try:
+        source = config_path.read_text(encoding="utf-8-sig") if config_path.exists() else ""
+        updated, changed = _chatgpt_work_config_text(source)
+        if not changed:
+            return True, f"preferencia Work confirmada em {config_path}"
+
+        tomllib.loads(updated)
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = config_path.with_name(f".{config_path.name}.resumator-{os.getpid()}.tmp")
+        try:
+            temporary_path.write_text(updated, encoding="utf-8", newline="")
+            os.replace(temporary_path, config_path)
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink(missing_ok=True)
+        return True, f"preferencia alterada para ChatGPT Work em {config_path}"
+    except Exception as exc:  # noqa: BLE001 - UI Automation still provides a safe fallback
+        return False, f"nao foi possivel gravar a preferencia Work em {config_path}: {exc}"
+
+
+def _resolve_chatgpt_work_target(assistant: DesktopAssistant) -> AssistantTarget | None:
+    preference_ok, preference_detail = _ensure_chatgpt_work_preference()
+    _log_automation(f"{assistant.display_name}: {preference_detail}")
+
+    launched, _ = _launch_assistant(assistant)
+    deadline = time.monotonic() + 10.0
+    fallback_windows: list[tuple[int, str]] = []
+    while time.monotonic() < deadline:
+        windows = find_assistant_windows(assistant.key)
+        if windows:
+            fallback_windows = windows
+            foreground_hwnd = _foreground_window_handle()
+            if foreground_hwnd is not None and windows[0][0] == foreground_hwnd:
+                break
+        time.sleep(0.25)
+
+    windows = fallback_windows or find_assistant_windows(assistant.key)
+    if not windows:
+        return None
+
+    hwnd, title = windows[0]
+    notes = []
+    if launched:
+        notes.append("ChatGPT aberto pelo aplicativo oficial do Windows.")
+    if preference_ok:
+        notes.append("Preferencia persistente do modo Work confirmada.")
+    else:
+        notes.append("A preferencia persistente sera confirmada pela interface.")
+    return AssistantTarget(hwnd=hwnd, title=title, note=" ".join(notes))
+
+
 def _resolve_assistant_target(assistant: DesktopAssistant) -> AssistantTarget | None:
+    if assistant.key == "chatgpt":
+        return _resolve_chatgpt_work_target(assistant)
+
     windows = find_assistant_windows(assistant.key)
     if windows:
         hwnd, title = windows[0]
@@ -1477,8 +1665,12 @@ def send_to_desktop_assistant(
             message = ""
 
         if message:
+            if assistant.composer_terms:
+                _activate_assistant_for_keyboard_input(assistant, target)
             _set_clipboard_text(message)
             time.sleep(0.1)
+            if not assistant.composer_terms:
+                _activate_assistant_for_keyboard_input(assistant, target)
             _hotkey("ctrl", "v")
             time.sleep(0.2)
             if attach_pdf and pdf_paths:
@@ -1501,6 +1693,7 @@ def send_to_desktop_assistant(
             notes.extend(pdf_attachment_result.notes)
 
         if submit and not _must_pause_for_attachment(attachment_paths, all_requested_attachments_attached):
+            _activate_assistant_for_keyboard_input(assistant, target)
             _press("enter")
         elif submit:
             notes.append(
@@ -1520,9 +1713,73 @@ def _prepare_assistant_for_send(
     target: AssistantTarget,
     notes: list[str],
 ) -> AssistantTarget:
+    if assistant.key == "chatgpt":
+        return _ensure_chatgpt_work_target(assistant, target, notes)
     if assistant.force_new_chat_before_send and assistant.key == "copilot":
         return _prepare_copilot_new_chat(assistant, target, notes)
     return target
+
+
+def _ensure_chatgpt_work_target(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+    notes: list[str],
+) -> AssistantTarget:
+    preference_ok, preference_detail = _ensure_chatgpt_work_preference()
+    _log_automation(f"{assistant.display_name}: {preference_detail}")
+
+    candidates: list[AssistantTarget] = []
+    seen_hwnds: set[int] = set()
+    if target.hwnd is not None:
+        candidates.append(target)
+        seen_hwnds.add(target.hwnd)
+    for hwnd, title in find_assistant_windows(assistant.key):
+        if hwnd in seen_hwnds:
+            continue
+        candidates.append(AssistantTarget(hwnd=hwnd, title=title))
+        seen_hwnds.add(hwnd)
+
+    details: list[str] = []
+    for candidate in candidates:
+        if candidate.hwnd is None:
+            continue
+        try:
+            _activate_assistant_target(candidate)
+            time.sleep(0.25)
+        except Exception as exc:  # noqa: BLE001 - try the next valid ChatGPT window
+            details.append(f"janela {candidate.hwnd}: ativacao falhou ({exc})")
+            continue
+
+        selected = False
+        detail = "seletor ainda nao consultado"
+        for attempt in range(3):
+            selected, detail = _select_chatgpt_work_mode(candidate.hwnd)
+            _log_automation(
+                f"{assistant.display_name}: confirmacao do modo Work na janela {candidate.hwnd} "
+                f"(tentativa {attempt + 1}/3): {detail}"
+            )
+            if selected:
+                break
+            if attempt < 2:
+                time.sleep(0.4)
+        if not selected:
+            details.append(f"janela {candidate.hwnd}: {detail}")
+            continue
+
+        _activate_assistant_target(candidate)
+        if detail.startswith("ALREADY_WORK|"):
+            notes.append("ChatGPT Work ja estava selecionado.")
+        else:
+            notes.append("ChatGPT Work selecionado e confirmado.")
+        if not preference_ok:
+            notes.append("Modo Work confirmado pela interface; a preferencia persistente nao pode ser gravada.")
+        return AssistantTarget(hwnd=candidate.hwnd, title="ChatGPT Work")
+
+    detail_text = "; ".join(details[-3:]) if details else "nenhuma janela principal valida foi localizada"
+    raise AutomationError(
+        "Nao foi possivel confirmar o seletor do ChatGPT Work. "
+        f"A automacao foi interrompida antes de colar ou enviar qualquer conteudo ({detail_text})."
+    )
 
 
 def _prepare_copilot_new_chat(
@@ -2490,6 +2747,7 @@ def _attach_files_to_assistant(
     if assistant.supports_clipboard_file_paste:
         attached = _copy_files_to_clipboard(file_paths)
         if attached:
+            _activate_assistant_target(target)
             _hotkey("ctrl", "v")
             time.sleep(upload_wait_seconds)
             return AttachmentResult(True, [_attachment_note(file_paths)])
@@ -2509,6 +2767,7 @@ def _attach_files_to_assistant(
 
         clipboard_attempted = _copy_files_to_clipboard(file_paths)
         if clipboard_attempted:
+            _activate_assistant_target(target)
             _hotkey("ctrl", "v")
             time.sleep(upload_wait_seconds)
             if assistant.trust_clipboard_attachment_fallback:
@@ -2682,17 +2941,208 @@ try {{
     return completed.returncode == 0, output or f"retorno={completed.returncode}"
 
 
+def _select_chatgpt_work_mode(hwnd: int) -> tuple[bool, str]:
+    if not hwnd:
+        return False, "INVALID_WINDOW|janela principal ausente"
+
+    script = r'''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -Namespace ResumatorChatGPT -Name NativeMouse -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern IntPtr GetForegroundWindow();
+"@
+
+function Invoke-ResumatorElement {
+    param(
+        [System.Windows.Automation.AutomationElement]$Element,
+        [IntPtr]$ExpectedHwnd
+    )
+    try {
+        $pattern = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+        $pattern.Invoke()
+        return $true
+    } catch {
+        try {
+            try {
+                $point = $Element.GetClickablePoint()
+                $clickX = [int]$point.X
+                $clickY = [int]$point.Y
+            } catch {
+                $rect = $Element.Current.BoundingRectangle
+                if ($rect.IsEmpty) { return $false }
+                $clickX = [int][Math]::Round($rect.Left + ($rect.Width / 2.0))
+                $clickY = [int][Math]::Round($rect.Top + ($rect.Height / 2.0))
+            }
+            if ([ResumatorChatGPT.NativeMouse]::GetForegroundWindow().ToInt64() -ne $ExpectedHwnd.ToInt64()) {
+                return $false
+            }
+            [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new($clickX, $clickY)
+            if ([ResumatorChatGPT.NativeMouse]::GetForegroundWindow().ToInt64() -ne $ExpectedHwnd.ToInt64()) {
+                return $false
+            }
+            [ResumatorChatGPT.NativeMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 80
+            [ResumatorChatGPT.NativeMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            return $true
+        } catch {
+            return $false
+        }
+    }
+}
+
+function Get-ModeSelector {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $elements = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    foreach ($element in $elements) {
+        try {
+            if (-not $element.Current.IsEnabled) { continue }
+            $controlType = [string]$element.Current.ControlType.ProgrammaticName
+            if (-not $controlType.Contains("Button")) { continue }
+            $name = ([string]$element.Current.Name).Trim()
+            $folded = $name.ToLowerInvariant()
+            if (
+                $folded.StartsWith("switch mode, current mode:") -or
+                $folded.StartsWith("alternar modo, modo atual:")
+            ) {
+                return $element
+            }
+        } catch {
+            continue
+        }
+    }
+    return $null
+}
+
+try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]__HWND__)
+} catch {
+    Write-Output ("NOT_FOUND|janela nao disponivel ao UI Automation: " + $_.Exception.Message)
+    exit 2
+}
+if ($null -eq $root) {
+    Write-Output "NOT_FOUND|janela nao exposta ao UI Automation"
+    exit 2
+}
+$appProcessId = [int]$root.Current.ProcessId
+$selector = Get-ModeSelector -Root $root
+if ($null -eq $selector) {
+    Write-Output "NOT_FOUND|seletor de modo Work/Codex nao localizado na janela"
+    exit 2
+}
+$selectorName = ([string]$selector.Current.Name).Trim()
+$selectorFolded = $selectorName.ToLowerInvariant()
+if ($selectorFolded -match ":\s*(work|trabalho)\s*$") {
+    Write-Output ("ALREADY_WORK|" + $selectorName)
+    exit 0
+}
+if (-not (Invoke-ResumatorElement -Element $selector -ExpectedHwnd ([IntPtr]__HWND__))) {
+    Write-Output ("FAILED|nao foi possivel abrir o seletor: " + $selectorName)
+    exit 3
+}
+
+$nameCondition = [System.Windows.Automation.OrCondition]::new(
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        "Work"
+    ),
+    [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::NameProperty,
+        "Trabalho"
+    )
+)
+$deadline = [DateTime]::UtcNow.AddSeconds(3)
+$workElement = $null
+while ([DateTime]::UtcNow -lt $deadline -and $null -eq $workElement) {
+    $matches = [System.Windows.Automation.AutomationElement]::RootElement.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        $nameCondition
+    )
+    foreach ($element in $matches) {
+        try {
+            if ([int]$element.Current.ProcessId -ne $appProcessId) { continue }
+            if (-not $element.Current.IsEnabled -or $element.Current.IsOffscreen) { continue }
+            $controlType = [string]$element.Current.ControlType.ProgrammaticName
+            if (
+                -not $controlType.Contains("MenuItem") -and
+                -not $controlType.Contains("ListItem") -and
+                -not $controlType.Contains("Button")
+            ) { continue }
+            $workElement = $element
+            break
+        } catch {
+            continue
+        }
+    }
+    if ($null -eq $workElement) { Start-Sleep -Milliseconds 100 }
+}
+if ($null -eq $workElement) {
+    Write-Output "NOT_FOUND|opcao Work/Trabalho nao localizada depois de abrir o seletor"
+    exit 2
+}
+if (-not (Invoke-ResumatorElement -Element $workElement -ExpectedHwnd ([IntPtr]__HWND__))) {
+    Write-Output "FAILED|opcao Work/Trabalho localizada, mas nao acionada"
+    exit 3
+}
+
+$deadline = [DateTime]::UtcNow.AddSeconds(4)
+while ([DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 120
+    $confirmedSelector = Get-ModeSelector -Root $root
+    if ($null -eq $confirmedSelector) { continue }
+    $confirmedName = ([string]$confirmedSelector.Current.Name).Trim()
+    if ($confirmedName.ToLowerInvariant() -match ":\s*(work|trabalho)\s*$") {
+        Write-Output ("SELECTED_WORK|" + $confirmedName)
+        exit 0
+    }
+}
+Write-Output "FAILED|a opcao Work foi acionada, mas o modo nao mudou na interface"
+exit 3
+'''.replace("__HWND__", str(int(hwnd)))
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            creationflags=creationflags,
+            timeout=12,
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced as a safe automation failure
+        return False, f"FAILED|erro ao confirmar ChatGPT Work: {exc}"
+
+    output = (completed.stdout or completed.stderr or "").strip()
+    status_lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith(("ALREADY_WORK|", "SELECTED_WORK|", "NOT_FOUND|", "FAILED|"))
+    ]
+    status = status_lines[-1] if status_lines else output
+    success = completed.returncode == 0 and status.startswith(("ALREADY_WORK|", "SELECTED_WORK|"))
+    return success, status or f"FAILED|retorno={completed.returncode}"
+
+
 def _select_files_in_open_dialog(file_paths: list[Path], wait_seconds: float) -> bool:
     dialog_hwnd = _wait_for_file_dialog(timeout_seconds=6.0)
     if not dialog_hwnd:
         return False
 
-    _activate_window(dialog_hwnd)
-    time.sleep(0.2)
     _set_clipboard_text(_file_dialog_selection_text(file_paths))
     time.sleep(0.1)
+    dialog_target = AssistantTarget(hwnd=dialog_hwnd, title=_window_text(dialog_hwnd) or "Seletor de arquivos")
+    _activate_assistant_target(dialog_target)
     _hotkey("ctrl", "v")
     time.sleep(0.2)
+    _activate_assistant_target(dialog_target)
     _press("enter")
     time.sleep(wait_seconds)
     return True
@@ -2813,7 +3263,13 @@ def _assistant_uses_manual_attachment(assistant_key: str | None) -> bool:
 def _activate_assistant_target(target: AssistantTarget) -> None:
     if target.hwnd is not None:
         _activate_window(target.hwnd)
-        return
+        for _ in range(15):
+            if _foreground_window_handle() == target.hwnd:
+                return
+            time.sleep(0.1)
+        raise AutomationError(
+            "Nao foi possivel confirmar que a janela correta esta em primeiro plano."
+        )
 
     pids: list[int] = []
     if target.pid is not None:
@@ -2824,6 +3280,291 @@ def _activate_assistant_target(target: AssistantTarget) -> None:
             return
 
     raise AutomationError("Não foi possível trazer a janela do aplicativo para frente.")
+
+
+def _activate_assistant_for_keyboard_input(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+) -> None:
+    """Activate the assistant and, for web PWAs, focus the message composer."""
+    if not assistant.composer_terms:
+        _activate_assistant_target(target)
+        return
+
+    hwnd = target.hwnd
+    if hwnd is None:
+        raise AutomationError(
+            f"Nao foi possivel identificar a janela visivel do {assistant.display_name}."
+        )
+
+    if _foreground_window_handle() != hwnd:
+        _activate_assistant_target(target)
+
+    focused, detail = _focus_assistant_composer(hwnd, assistant.composer_terms)
+    _log_automation(f"{assistant.display_name}: foco do campo de mensagem: {detail}")
+    if not focused:
+        raise AutomationError(
+            f"Nao foi possivel confirmar o campo de mensagem do {assistant.display_name}. "
+            "A colagem e o envio foram interrompidos para evitar inserir o texto no local errado."
+        )
+    time.sleep(0.12)
+
+
+def _focus_assistant_composer(
+    hwnd: int,
+    terms: tuple[str, ...],
+    timeout_seconds: float = 5.0,
+) -> tuple[bool, str]:
+    """Find and focus a Copilot/Gemini composer exposed through Windows UIA."""
+    if not hwnd or not terms:
+        return False, "NOT_FOUND|janela ou termos do campo de mensagem ausentes"
+
+    terms_json = json.dumps(list(terms), ensure_ascii=False)
+    timeout_milliseconds = max(500, int(timeout_seconds * 1000))
+    script = r'''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -Namespace ResumatorComposer -Name NativeMouse -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern IntPtr GetForegroundWindow();
+"@
+
+$terms = ConvertFrom-Json @'
+__TERMS_JSON__
+'@
+$expectedHwnd = [IntPtr]__HWND__
+$deadline = [DateTime]::UtcNow.AddMilliseconds(__TIMEOUT_MILLISECONDS__)
+$lastDetail = "nenhum editor compativel foi localizado"
+
+function Get-SafeLabel {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return "sem rotulo" }
+    return (($Value -replace '[\r\n|]+', ' ').Trim())
+}
+
+function Test-FocusWithin {
+    param(
+        [System.Windows.Automation.AutomationElement]$Candidate,
+        [int]$ProcessId
+    )
+    try {
+        if ($Candidate.Current.HasKeyboardFocus) { return $true }
+        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -eq $focused -or [int]$focused.Current.ProcessId -ne $ProcessId) { return $false }
+        $candidateId = ($Candidate.GetRuntimeId() -join '.')
+        $current = $focused
+        for ($depth = 0; $depth -lt 80 -and $null -ne $current; $depth++) {
+            try {
+                if (($current.GetRuntimeId() -join '.') -eq $candidateId) { return $true }
+                $current = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($current)
+            } catch {
+                break
+            }
+        }
+    } catch {
+        return $false
+    }
+    return $false
+}
+
+function Get-BestComposer {
+    param([System.Windows.Automation.AutomationElement]$Root)
+    $rootRect = $Root.Current.BoundingRectangle
+    if ($rootRect.IsEmpty -or $rootRect.Width -lt 300 -or $rootRect.Height -lt 250) { return $null }
+
+    $elements = $Root.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    $best = $null
+    $bestScore = [int]::MinValue
+    $bestName = ""
+    $bestType = ""
+
+    foreach ($element in $elements) {
+        try {
+            if (-not $element.Current.IsEnabled -or $element.Current.IsOffscreen) { continue }
+            if (-not $element.Current.IsKeyboardFocusable) { continue }
+
+            $controlType = [string]$element.Current.ControlType.ProgrammaticName
+            $isEdit = $controlType.Contains("Edit")
+            $isDocument = $controlType.Contains("Document")
+            $isCustom = $controlType.Contains("Custom")
+            if (-not $isEdit -and -not $isDocument -and -not $isCustom) { continue }
+
+            $rect = $element.Current.BoundingRectangle
+            if ($rect.IsEmpty -or $rect.Width -lt 120 -or $rect.Height -lt 20) { continue }
+            $widthRatio = $rect.Width / [double]$rootRect.Width
+            $heightRatio = $rect.Height / [double]$rootRect.Height
+            $centerYRatio = (($rect.Top + ($rect.Height / 2.0)) - $rootRect.Top) / [double]$rootRect.Height
+            if ($widthRatio -lt 0.20 -or $heightRatio -gt 0.38 -or $centerYRatio -lt 0.48) { continue }
+
+            $name = [string]$element.Current.Name
+            $automationId = [string]$element.Current.AutomationId
+            $helpText = [string]$element.Current.HelpText
+            $className = [string]$element.Current.ClassName
+            $itemStatus = [string]$element.Current.ItemStatus
+            $haystack = ("$name $automationId $helpText $className $itemStatus $controlType").ToLowerInvariant()
+            if ($haystack -match 'search|pesquisar|address|endere[cç]o|url|find|localizar|filter|filtrar|history|hist[oó]rico|conversation list|lista de conversas') {
+                continue
+            }
+
+            $score = 0
+            $positiveMatch = $false
+            foreach ($term in $terms) {
+                $needle = ([string]$term).Trim().ToLowerInvariant()
+                if ([string]::IsNullOrWhiteSpace($needle)) { continue }
+                if ($haystack.Contains($needle)) {
+                    $positiveMatch = $true
+                    $score += 65 + [Math]::Min(35, $needle.Length)
+                }
+                if ($name.Trim().ToLowerInvariant() -eq $needle) { $score += 80 }
+            }
+
+            if (($isDocument -or $isCustom) -and -not $positiveMatch) { continue }
+            if ($isEdit) { $score += 120 }
+            if ($isDocument) { $score += 75 }
+            if ($isCustom) { $score += 45 }
+            $score += 70
+
+            try {
+                $valuePattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+                if (-not $valuePattern.Current.IsReadOnly) { $score += 65 }
+            } catch { }
+            try {
+                $null = $element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+                $score += 35
+            } catch { }
+
+            if ($centerYRatio -ge 0.62) { $score += 45 }
+            if ($centerYRatio -ge 0.76) { $score += 35 }
+            if ($widthRatio -ge 0.35) { $score += 30 }
+            if ($widthRatio -ge 0.55) { $score += 20 }
+            if ($rect.Height -ge 30 -and $rect.Height -le 240) { $score += 20 }
+
+            if ($score -gt $bestScore) {
+                $best = $element
+                $bestScore = $score
+                $bestName = $name
+                $bestType = $controlType
+            }
+        } catch {
+            continue
+        }
+    }
+
+    if ($null -eq $best -or $bestScore -lt 180) { return $null }
+    return @{
+        Element = $best
+        Score = $bestScore
+        Name = $bestName
+        Type = $bestType
+    }
+}
+
+try {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($expectedHwnd)
+    if ($null -eq $root) {
+        Write-Output "NOT_FOUND|janela nao exposta ao UI Automation"
+        exit 2
+    }
+    $processId = [int]$root.Current.ProcessId
+
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $candidate = Get-BestComposer -Root $root
+        if ($null -eq $candidate) {
+            Start-Sleep -Milliseconds 180
+            continue
+        }
+
+        $element = $candidate.Element
+        $label = Get-SafeLabel ([string]$candidate.Name)
+        try {
+            $element.SetFocus()
+            Start-Sleep -Milliseconds 100
+            if (Test-FocusWithin -Candidate $element -ProcessId $processId) {
+                Write-Output ("FOCUSED|score=" + $candidate.Score + "|name=" + $label + "|type=" + $candidate.Type)
+                exit 0
+            }
+        } catch {
+            $lastDetail = "SetFocus falhou: " + $_.Exception.Message
+        }
+
+        if ([ResumatorComposer.NativeMouse]::GetForegroundWindow().ToInt64() -ne $expectedHwnd.ToInt64()) {
+            Write-Output "FAILED|outra janela assumiu o primeiro plano antes do foco"
+            exit 3
+        }
+
+        try {
+            $rect = $element.Current.BoundingRectangle
+            try {
+                $point = $element.GetClickablePoint()
+                $clickX = [int][Math]::Round($point.X)
+                $clickY = [int][Math]::Round($point.Y)
+            } catch {
+                $offset = [Math]::Min($rect.Width - 24.0, [Math]::Max(24.0, $rect.Width * 0.18))
+                $clickX = [int][Math]::Round($rect.Left + $offset)
+                $clickY = [int][Math]::Round($rect.Top + ($rect.Height / 2.0))
+            }
+            [System.Windows.Forms.Cursor]::Position = [System.Drawing.Point]::new($clickX, $clickY)
+            if ([ResumatorComposer.NativeMouse]::GetForegroundWindow().ToInt64() -ne $expectedHwnd.ToInt64()) {
+                Write-Output "FAILED|outra janela assumiu o primeiro plano antes do clique"
+                exit 3
+            }
+            [ResumatorComposer.NativeMouse]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 70
+            [ResumatorComposer.NativeMouse]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 120
+            if (Test-FocusWithin -Candidate $element -ProcessId $processId) {
+                Write-Output ("FOCUSED_BY_CLICK|score=" + $candidate.Score + "|name=" + $label + "|type=" + $candidate.Type)
+                exit 0
+            }
+            $lastDetail = "o editor foi localizado, mas nao confirmou foco"
+        } catch {
+            $lastDetail = "clique de foco falhou: " + $_.Exception.Message
+        }
+        Start-Sleep -Milliseconds 180
+    }
+
+    Write-Output ("NOT_FOUND|" + $lastDetail)
+    exit 2
+} catch {
+    Write-Output ("FAILED|" + $_.Exception.Message)
+    exit 3
+}
+'''
+    script = (
+        script.replace("__TERMS_JSON__", terms_json)
+        .replace("__HWND__", str(int(hwnd)))
+        .replace("__TIMEOUT_MILLISECONDS__", str(timeout_milliseconds))
+    )
+
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            creationflags=creationflags,
+            timeout=timeout_seconds + 5.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - safe UI Automation failure
+        return False, f"FAILED|erro ao focar o campo de mensagem: {exc}"
+
+    output = (completed.stdout or completed.stderr or "").strip()
+    status_lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip().startswith(("FOCUSED|", "FOCUSED_BY_CLICK|", "NOT_FOUND|", "FAILED|"))
+    ]
+    status = status_lines[-1] if status_lines else output
+    success = completed.returncode == 0 and status.startswith(("FOCUSED|", "FOCUSED_BY_CLICK|"))
+    return success, status or f"FAILED|retorno={completed.returncode}"
 
 
 def _activate_window(hwnd: int) -> None:

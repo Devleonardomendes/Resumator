@@ -53,7 +53,7 @@ TOP = 735
 BOTTOM = 58
 LINE_HEIGHT = 14
 BODY_FONT_SIZE = 10
-APP_NAME = "Resumator 11.2"
+APP_NAME = "Resumator 11.3"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 DOCUMENT_TITLE = "RESUMO GERADO POR IA"
 PROMPT_DOCUMENT_TITLE = "PROMPT PARA ENVIO À IA"
@@ -581,7 +581,7 @@ def _export_formatted_pdf_via_word(
     if os.name != "nt" or Document is None or Inches is None or Pt is None:
         return False
 
-    temp_dir = Path(tempfile.gettempdir()) / "resumator-11.2-pdf-export"
+    temp_dir = Path(tempfile.gettempdir()) / "resumator-11.3-pdf-export"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_docx = temp_dir / f"{output_path.stem}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}.docx"
     try:
