@@ -12,12 +12,19 @@ import sys
 import tempfile
 import threading
 
+try:
+    import winsound
+except ImportError:  # pragma: no cover - Windows-only optional module
+    winsound = None
+
 from .chatgpt_desktop import (
     assistant_display_name,
     capture_latest_response_from_assistant,
+    enforce_assistant_window_locks,
     get_clipboard_html,
     get_clipboard_text,
     open_desktop_assistant,
+    release_assistant_window_locks,
     send_to_desktop_assistant,
 )
 from .logging_utils import collect_logs, write_exception, write_log
@@ -35,9 +42,9 @@ from .solicitador_bridge import SolicitadorExportResult, export_summary_to_solic
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 DATA_DIR = APP_DIR / "data"
 PROMPTS_PATH = DATA_DIR / "prompts.json"
-SESSION_PATH = DATA_DIR / "session-resumator-11.3.json"
+SESSION_PATH = DATA_DIR / "session-resumator-11.4.json"
 OUTPUT_DIR = APP_DIR / "saidas"
-APP_TITLE = "Resumator 11.3"
+APP_TITLE = "Resumator 11.4"
 DEVELOPER = "LEONARDO CARDOSO DE MELO TEIXEIRA MENDES - PROCURADOR FEDERAL / AGU"
 MAX_PDF_FILES = 10
 DELIVERY_TEXT = "text"
@@ -56,6 +63,8 @@ IGNORE_TIME_LIMIT_INSTRUCTION = (
     "podendo pensar pelo tempo suficiente para que a resposta seja enviada em até 30 (trinta) minutos."
 )
 RESPONSE_DOCX_ASSISTANTS = {"chatgpt", "copilot"}
+SUBMIT_LOCKED_ASSISTANTS = frozenset({"copilot", "gemini"})
+MULTI_PDF_ATTACH_DEFAULT_OFF_ASSISTANTS = frozenset({"copilot", "gemini"})
 ASSISTANT_EXPORT_NAMES = {
     "chatgpt": "ChatGPT",
     "copilot": "Copilot",
@@ -70,6 +79,11 @@ MOUSE_SUSPEND_NOTICE = (
 ASSISTANT_SELECTION_MOUSE_SUSPEND_SECONDS = 5
 LMSTUDIO_SELECTION_MOUSE_SUSPEND_SECONDS = 15
 CAPTURE_MOUSE_SUSPEND_SECONDS = 5
+ASSISTANT_WINDOW_LOCK_POLL_MS = 400
+EXPORT_CONFIRMATION_DURATION_MS = 3000
+EXPORT_CONFIRMATION_FRAME_MS = 83
+EXPORT_CONFIRMATION_MAX_FRAMES = 60
+EXPORT_CONFIRMATION_SIZE = (640, 360)
 SEND_MOUSE_SUSPEND_UNTIL_UPLOAD_STATUS = "mouse suspenso até a conclusão do último upload de PDF"
 WH_MOUSE_LL = 14
 HC_ACTION = 0
@@ -138,10 +152,82 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 try:
+    from PIL import Image, ImageTk
+except ImportError:  # pragma: no cover - packaged app requires Pillow; fallback remains available
+    Image = None
+    ImageTk = None
+
+try:
     from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
 except Exception:  # pragma: no cover - optional desktop dependency
     DND_FILES = None
     TkinterDnD = None
+
+
+def _assistant_allows_submit(assistant_key: str) -> bool:
+    return assistant_key not in SUBMIT_LOCKED_ASSISTANTS
+
+
+def _automatic_attachment_defaults_off(assistant_key: str, pdf_count: int) -> bool:
+    return assistant_key in MULTI_PDF_ATTACH_DEFAULT_OFF_ASSISTANTS and pdf_count > 1
+
+
+def _maximize_tk_window_on_open(window: tk.Misc) -> None:
+    """Use the native Windows maximized state without entering fullscreen."""
+
+    def maximize() -> None:
+        try:
+            if window.winfo_exists():
+                window.state("zoomed")
+        except tk.TclError:
+            return
+
+    maximize()
+    try:
+        window.after_idle(maximize)
+    except tk.TclError:
+        return
+
+
+def _lock_tk_window_maximized(window: tk.Misc) -> None:
+    """Keep a substantive Resumator window maximized and non-resizable."""
+    if getattr(window, "_resumator_maximize_lock_installed", False):
+        return
+    maximize_pending = False
+
+    def maximize() -> None:
+        nonlocal maximize_pending
+        maximize_pending = False
+        try:
+            if not window.winfo_exists():
+                return
+            window.state("zoomed")
+            window.resizable(False, False)
+        except tk.TclError:
+            return
+
+    def keep_maximized(event: tk.Event | None = None) -> None:
+        nonlocal maximize_pending
+        if event is not None and getattr(event, "widget", window) is not window:
+            return
+        try:
+            should_maximize = bool(window.winfo_exists()) and window.state() == "normal"
+        except tk.TclError:
+            return
+        if should_maximize and not maximize_pending:
+            maximize_pending = True
+            window.after_idle(maximize)
+
+    try:
+        window.state("zoomed")
+        window.resizable(False, False)
+        window.bind("<Map>", keep_maximized, add="+")
+        window.bind("<Configure>", keep_maximized, add="+")
+        setattr(window, "_resumator_maximize_lock_installed", True)
+        window.after_idle(maximize)
+    except tk.TclError:
+        setattr(window, "_resumator_maximize_lock_installed", False)
+        return
 
 
 def _resource_path(*parts: str) -> Path:
@@ -212,10 +298,19 @@ class ResumatorApp:
         self._mouse_clip_active = False
         self._mouse_suspend_notice_window: tk.Toplevel | None = None
         self._deferred_notice_controls: list[tuple[tk.Toplevel, ttk.Button]] = []
+        self._assistant_window_lock_after_id: str | None = None
+        self._export_confirmation_window: tk.Toplevel | None = None
+        self._export_confirmation_label: tk.Label | None = None
+        self._export_confirmation_frames: list[object] = []
+        self._export_confirmation_frame_after_id: str | None = None
+        self._export_confirmation_close_after_id: str | None = None
+        self._closing = False
 
         self._configure_style()
         self._build_ui()
         self._reload_prompts()
+        _maximize_tk_window_on_open(self.root)
+        self._schedule_assistant_window_lock_enforcement()
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -226,6 +321,27 @@ class ResumatorApp:
         style.configure("Section.TLabel", font=("Segoe UI", 10, "bold"))
         style.configure("Status.TLabel", foreground="#335")
         style.configure("StatusAlert.TLabel", foreground="#b00020")
+
+    def _schedule_assistant_window_lock_enforcement(self) -> None:
+        if self._closing or self._assistant_window_lock_after_id is not None:
+            return
+        try:
+            self._assistant_window_lock_after_id = self.root.after(
+                ASSISTANT_WINDOW_LOCK_POLL_MS,
+                self._enforce_assistant_window_locks,
+            )
+        except tk.TclError:
+            self._assistant_window_lock_after_id = None
+
+    def _enforce_assistant_window_locks(self) -> None:
+        self._assistant_window_lock_after_id = None
+        if self._closing:
+            return
+        try:
+            enforce_assistant_window_locks()
+        except Exception as exc:  # noqa: BLE001 - periodic enforcement must not interrupt the UI
+            write_exception("Falha ao manter janelas das IAs maximizadas", exc)
+        self._schedule_assistant_window_lock_enforcement()
 
     def _set_window_icon(self) -> None:
         icon_path = _resource_path("assets", "robot.ico")
@@ -244,6 +360,156 @@ class ResumatorApp:
             return tk.PhotoImage(file=str(image_path))
         except tk.TclError:
             return None
+
+    def _show_export_success(self, output_format: str, file_label: str) -> None:
+        if output_format in {"docx", "pdf"}:
+            self._show_export_confirmation(file_label)
+            return
+        messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label}.")
+
+    def _show_export_confirmation(self, file_label: str) -> None:
+        animation_path = _resource_path("assets", "export-success.webp")
+        if Image is None or ImageTk is None or not animation_path.is_file():
+            messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label}.")
+            return
+
+        self._close_export_confirmation()
+        try:
+            frames = self._load_export_confirmation_frames(animation_path)
+            if not frames:
+                raise RuntimeError("A animação de confirmação não contém quadros reproduzíveis.")
+
+            window = tk.Toplevel(self.root)
+            self._export_confirmation_window = window
+            window.withdraw()
+            window.title(APP_TITLE)
+            window.configure(background="black")
+            window.overrideredirect(True)
+            window.attributes("-topmost", True)
+            window.transient(self.root)
+
+            label = tk.Label(
+                window,
+                image=frames[0],
+                background="black",
+                borderwidth=0,
+                highlightthickness=0,
+            )
+            label.pack()
+
+            self.root.update_idletasks()
+            width, height = EXPORT_CONFIRMATION_SIZE
+            root_x = self.root.winfo_rootx()
+            root_y = self.root.winfo_rooty()
+            root_width = max(self.root.winfo_width(), width)
+            root_height = max(self.root.winfo_height(), height)
+            x = root_x + max((root_width - width) // 2, 0)
+            y = root_y + max((root_height - height) // 2, 0)
+            window.geometry(f"{width}x{height}+{x}+{y}")
+
+            self._export_confirmation_label = label
+            self._export_confirmation_frames = frames
+            window.bind("<Escape>", lambda _event: self._close_export_confirmation())
+            window.bind("<Button-1>", lambda _event: self._close_export_confirmation())
+            window.protocol("WM_DELETE_WINDOW", self._close_export_confirmation)
+            window.deiconify()
+            window.lift()
+            window.focus_force()
+            try:
+                window.grab_set()
+            except tk.TclError:
+                pass
+
+            self._play_export_confirmation_sound()
+            self._advance_export_confirmation_frame(0)
+            self._export_confirmation_close_after_id = window.after(
+                EXPORT_CONFIRMATION_DURATION_MS,
+                self._close_export_confirmation,
+            )
+        except Exception as exc:  # noqa: BLE001 - confirmation must never turn a saved export into an error
+            self._close_export_confirmation()
+            write_exception("Falha ao reproduzir confirmação de exportação", exc)
+            messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label}.")
+
+    def _load_export_confirmation_frames(self, animation_path: Path) -> list[object]:
+        if Image is None or ImageTk is None:
+            return []
+
+        frames: list[object] = []
+        with Image.open(animation_path) as animation:
+            frame_count = min(getattr(animation, "n_frames", 1), EXPORT_CONFIRMATION_MAX_FRAMES)
+            resampling = getattr(Image, "Resampling", Image).LANCZOS
+            for frame_index in range(frame_count):
+                animation.seek(frame_index)
+                frame = animation.convert("RGB")
+                if frame.size != EXPORT_CONFIRMATION_SIZE:
+                    frame = frame.resize(EXPORT_CONFIRMATION_SIZE, resampling)
+                frames.append(ImageTk.PhotoImage(frame.copy(), master=self.root))
+        return frames
+
+    def _advance_export_confirmation_frame(self, frame_index: int) -> None:
+        self._export_confirmation_frame_after_id = None
+        window = getattr(self, "_export_confirmation_window", None)
+        label = getattr(self, "_export_confirmation_label", None)
+        frames = getattr(self, "_export_confirmation_frames", [])
+        if window is None or label is None or not frames:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+            label.configure(image=frames[frame_index % len(frames)])
+            next_index = (frame_index + 1) % len(frames)
+            self._export_confirmation_frame_after_id = window.after(
+                EXPORT_CONFIRMATION_FRAME_MS,
+                lambda: self._advance_export_confirmation_frame(next_index),
+            )
+        except tk.TclError:
+            self._close_export_confirmation()
+
+    def _play_export_confirmation_sound(self) -> None:
+        sound_path = _resource_path("assets", "export-success.wav")
+        if winsound is None or not sound_path.is_file():
+            return
+        try:
+            flags = winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT
+            winsound.PlaySound(str(sound_path), flags)
+        except (OSError, RuntimeError) as exc:
+            write_exception("Falha ao reproduzir áudio da confirmação de exportação", exc)
+
+    def _close_export_confirmation(self) -> None:
+        window = getattr(self, "_export_confirmation_window", None)
+        frame_after_id = getattr(self, "_export_confirmation_frame_after_id", None)
+        close_after_id = getattr(self, "_export_confirmation_close_after_id", None)
+        self._export_confirmation_frame_after_id = None
+        self._export_confirmation_close_after_id = None
+        self._export_confirmation_window = None
+        self._export_confirmation_label = None
+        self._export_confirmation_frames = []
+
+        for after_id in (frame_after_id, close_after_id):
+            if after_id is None:
+                continue
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+        if window is not None:
+            try:
+                if window.winfo_exists():
+                    try:
+                        window.grab_release()
+                    except tk.TclError:
+                        pass
+                    window.destroy()
+            except tk.TclError:
+                pass
+
+        if winsound is not None:
+            try:
+                winsound.PlaySound(None, 0)
+            except (OSError, RuntimeError):
+                pass
 
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
@@ -801,7 +1067,12 @@ class ResumatorApp:
         if assistant_key != "none":
             self.delivery_mode_var.set(DELIVERY_TEXT)
             self.submit_var.set(False)
+            if _automatic_attachment_defaults_off(assistant_key, len(self.pdf_paths)):
+                self.attach_var.set(False)
         self.response_mode_var.set(RESPONSE_TEXT_ONLY)
+
+    def _effective_submit(self, assistant_key: str) -> bool:
+        return _assistant_allows_submit(assistant_key) and bool(self.submit_var.get())
 
     def _refresh_response_mode_controls(self, assistant_key: str) -> None:
         text_state = "normal"
@@ -844,15 +1115,16 @@ class ResumatorApp:
             return
         if assistant_key == "lmstudio_desktop":
             self.send_button.configure(text="Enviar ao LM Studio", state="normal")
-            self.attach_check.configure(state="normal")
-            self.submit_check.configure(state="normal")
-            self.ignore_time_limit_check.configure(state="normal")
-            return
+        else:
+            assistant_name = assistant_display_name(assistant_key).replace(" Desktop", "")
+            self.send_button.configure(text=f"Enviar ao {assistant_name}", state="normal")
 
-        assistant_name = assistant_display_name(assistant_key).replace(" Desktop", "")
-        self.send_button.configure(text=f"Enviar ao {assistant_name}", state="normal")
         self.attach_check.configure(state="normal")
-        self.submit_check.configure(state="normal")
+        if _assistant_allows_submit(assistant_key):
+            self.submit_check.configure(state="normal")
+        else:
+            self.submit_var.set(False)
+            self.submit_check.configure(state="disabled")
         self.ignore_time_limit_check.configure(state="normal")
 
     def _refresh_delivery_controls(self, assistant_key: str) -> None:
@@ -1064,7 +1336,7 @@ class ResumatorApp:
     def _export_user_prompts(self) -> None:
         if not self._ensure_process_number_before_prompt():
             return
-        default_name = f"prompts-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        default_name = f"prompts-resumator-11.4-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Exportar todos os prompts",
             defaultextension=".json",
@@ -1170,6 +1442,8 @@ class ResumatorApp:
         delivery_mode = self._effective_delivery_mode(assistant_key)
         prompt_text = self._prompt_text_for_assistant(prompt, assistant_key)
         response_mode = self._effective_response_mode(assistant_key)
+        attach_pdf = bool(self.attach_var.get())
+        submit = self._effective_submit(assistant_key)
         prompt_document_path: Path | None = None
         if delivery_mode == DELIVERY_DOCX:
             try:
@@ -1178,7 +1452,12 @@ class ResumatorApp:
                 write_exception("Falha ao gerar DOCX de envio", exc)
                 self._show_system_error(f"Não foi possível gerar o DOCX de envio: {exc}")
                 return
-        if not self._confirm_local_automation(assistant_name, delivery_mode):
+        if not self._confirm_local_automation(
+            assistant_name,
+            delivery_mode,
+            attach_pdf=attach_pdf,
+            submit=submit,
+        ):
             self._set_status("Envio cancelado pelo usuario.")
             return
         self.send_button.configure(state="disabled")
@@ -1194,8 +1473,8 @@ class ResumatorApp:
             assistant_key,
             prompt_text,
             list(self.pdf_paths),
-            self.attach_var.get(),
-            self.submit_var.get(),
+            attach_pdf,
+            submit,
             delivery_mode,
             prompt_document_path,
         )
@@ -1235,10 +1514,10 @@ class ResumatorApp:
         return instruction_text
 
     def _create_prompt_document(self, prompt: Prompt, pdf_paths: list[Path], prompt_text: str) -> Path:
-        output_dir = Path(tempfile.gettempdir()) / "resumator-11.3-envios"
+        output_dir = Path(tempfile.gettempdir()) / "resumator-11.4-envios"
         output_path = _unique_output_path(
             output_dir,
-            f"prompt-ia-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            f"prompt-ia-resumator-11.4-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
             ".docx",
         )
         return export_prompt_docx(
@@ -1248,11 +1527,18 @@ class ResumatorApp:
             source_pdf=pdf_paths,
         )
 
-    def _confirm_local_automation(self, assistant_name: str, delivery_mode: str) -> bool:
+    def _confirm_local_automation(
+        self,
+        assistant_name: str,
+        delivery_mode: str,
+        *,
+        attach_pdf: bool,
+        submit: bool,
+    ) -> bool:
         pdf_list = "\n".join(f"- {path}" for path in self.pdf_paths)
         attach_action = (
             "tentar anexar automaticamente os PDFs selecionados"
-            if self.attach_var.get()
+            if attach_pdf
             else "nao anexar automaticamente os PDFs"
         )
         delivery_action = (
@@ -1260,7 +1546,7 @@ class ResumatorApp:
             if delivery_mode == DELIVERY_TEXT
             else "colar o prompt como texto e anexar uma copia DOCX do prompt"
         )
-        submit_action = "pressionar Enter ao final" if self.submit_var.get() else "deixar o envio pausado"
+        submit_action = "pressionar Enter ao final" if submit else "deixar o envio pausado"
         return messagebox.askyesno(
             "Autorizar automacao local",
             (
@@ -1488,7 +1774,7 @@ class ResumatorApp:
             "delivery_mode": self.delivery_mode_var.get(),
             "response_mode": self.response_mode_var.get(),
             "attach_pdf": self.attach_var.get(),
-            "submit": self.submit_var.get(),
+            "submit": self._effective_submit(self.assistant_var.get()),
             "ignore_time_limit": self.ignore_time_limit_var.get(),
             "response_text": self.response_text.get("1.0", "end").rstrip(),
             "response_rich_html": self.response_rich_html,
@@ -1498,6 +1784,9 @@ class ResumatorApp:
 
     def _apply_session_payload(self, payload: dict) -> None:
         self.process_number_var.set(str(payload.get("process_number") or ""))
+        # Rendering PDF rows refreshes controls. Neutralize the previous destination and
+        # apply saved mode values only after PDFs and prompt prerequisites are restored.
+        self.assistant_var.set("none")
 
         assistant = str(payload.get("assistant") or "none")
         if assistant not in {"none", "chatgpt", "copilot", "gemini", "lmstudio_desktop", "deepseek"}:
@@ -1505,16 +1794,15 @@ class ResumatorApp:
         restored_assistant = assistant
 
         delivery_mode = str(payload.get("delivery_mode") or DELIVERY_TEXT)
-        self.delivery_mode_var.set(delivery_mode if delivery_mode in {DELIVERY_TEXT, DELIVERY_DOCX} else DELIVERY_TEXT)
+        if delivery_mode not in {DELIVERY_TEXT, DELIVERY_DOCX}:
+            delivery_mode = DELIVERY_TEXT
 
         response_mode = str(payload.get("response_mode") or RESPONSE_TEXT_ONLY)
         if response_mode not in {RESPONSE_TEXT_ONLY, RESPONSE_TEXT_AND_DOCX}:
             response_mode = RESPONSE_TEXT_ONLY
-        self.response_mode_var.set(response_mode)
-
-        self.attach_var.set(bool(payload.get("attach_pdf", True)))
-        self.submit_var.set(bool(payload.get("submit", False)))
-        self.ignore_time_limit_var.set(bool(payload.get("ignore_time_limit", False)))
+        attach_pdf = bool(payload.get("attach_pdf", True))
+        submit = bool(payload.get("submit", False))
+        ignore_time_limit = bool(payload.get("ignore_time_limit", False))
 
         raw_paths = payload.get("pdf_paths", [])
         restored_paths: list[Path] = []
@@ -1536,6 +1824,11 @@ class ResumatorApp:
         self.last_output_path = Path(last_output) if isinstance(last_output, str) and last_output.strip() else None
 
         self._restore_session_prompt(payload)
+        self.delivery_mode_var.set(delivery_mode)
+        self.response_mode_var.set(response_mode)
+        self.attach_var.set(attach_pdf)
+        self.submit_var.set(submit)
+        self.ignore_time_limit_var.set(ignore_time_limit)
         self.assistant_var.set(restored_assistant if restored_assistant == "none" or self._can_choose_assistant() else "none")
         self._refresh_send_button()
 
@@ -1616,7 +1909,7 @@ class ResumatorApp:
             self._show_system_error(f"Não foi possível gerar o arquivo {file_label}: {exc}")
             return
         self._set_status(f"{file_label} gerado: {self.last_output_path}")
-        messagebox.showinfo(APP_TITLE, f"Resposta exportada em {file_label}.")
+        self._show_export_success(output_format, file_label)
 
     def _export_stem_from_process_number(self) -> str | None:
         process_number = self.process_number_var.get().strip()
@@ -1750,10 +2043,10 @@ class ResumatorApp:
             return
 
         self._set_status(f"PDF gerado a partir do DOCX: {self.last_output_path}")
-        messagebox.showinfo(APP_TITLE, "DOCX importado e exportado como PDF.")
+        self._show_export_success("pdf", "PDF")
 
     def _export_logs_txt(self) -> None:
-        default_name = f"logs-resumator-11.3-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        default_name = f"logs-resumator-11.4-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
         path = filedialog.asksaveasfilename(
             title="Salvar logs em TXT",
             defaultextension=".txt",
@@ -2008,7 +2301,16 @@ class ResumatorApp:
                 self._mouse_block_callback = None
 
     def _on_close(self) -> None:
+        self._closing = True
+        self._close_export_confirmation()
+        if self._assistant_window_lock_after_id is not None:
+            try:
+                self.root.after_cancel(self._assistant_window_lock_after_id)
+            except tk.TclError:
+                pass
+            self._assistant_window_lock_after_id = None
         self._release_mouse_block()
+        release_assistant_window_locks()
         self.root.destroy()
 
     def _set_status_style(self, alert: bool) -> None:
@@ -2222,6 +2524,7 @@ class PromptAssistantDialog:
 
         self.window.bind("<Escape>", lambda _: self._cancel())
         self.window.bind("<Control-Return>", lambda _: self._apply())
+        _lock_tk_window_maximized(self.window)
 
     def _build_section(
         self,
@@ -2472,6 +2775,7 @@ class PromptEditor:
 
         self.window.bind("<Escape>", lambda _: self._cancel())
         self.window.bind("<Control-s>", lambda _: self._save())
+        _lock_tk_window_maximized(self.window)
 
     def show(self) -> dict[str, str] | None:
         self.parent.wait_window(self.window)
@@ -2498,7 +2802,10 @@ def main() -> None:
     _initialize_tcl_runtime()
     root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
     app = ResumatorApp(root)
-    root.mainloop()
+    try:
+        root.mainloop()
+    finally:
+        release_assistant_window_locks()
 
 
 if __name__ == "__main__":

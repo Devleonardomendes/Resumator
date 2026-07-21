@@ -56,7 +56,11 @@ class AssistantKeyboardFocusTests(unittest.TestCase):
         ):
             desktop._activate_assistant_for_keyboard_input(assistant, self.target)
 
-        activate.assert_called_once_with(self.target)
+        activate.assert_called_once_with(
+            self.target,
+            lock_maximized=False,
+            restore_unlocked=False,
+        )
 
     def test_pwa_focus_failure_stops_keyboard_input(self) -> None:
         assistant = desktop.ASSISTANTS["copilot"]
@@ -82,7 +86,11 @@ class AssistantKeyboardFocusTests(unittest.TestCase):
         ):
             desktop._activate_assistant_for_keyboard_input(assistant, self.target)
 
-        activate.assert_called_once_with(self.target)
+        activate.assert_called_once_with(
+            self.target,
+            lock_maximized=False,
+            restore_unlocked=False,
+        )
         focus.assert_not_called()
 
 

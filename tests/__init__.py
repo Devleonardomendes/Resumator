@@ -1,1 +1,1 @@
-"""Testes automatizados do Resumator 11.3."""
+"""Testes automatizados do Resumator 11.4."""

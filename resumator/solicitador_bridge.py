@@ -13,6 +13,7 @@ import tempfile
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
 SOLICITADOR_TARGETS = (
+    ("QUIMERA 4.2", "QUIMERA 4.2.exe"),
     ("QUIMERA 4.1", "QUIMERA 4.1.exe"),
     ("QUIMERA ULTIMATE 2.0", "QUIMERA ULTIMATE 2.0.exe"),
     ("QUIMERA", "QUIMERA.exe"),
@@ -81,13 +82,13 @@ def _write_payload(
     prompt_name: str | None,
     source_pdf: Path | Iterable[Path] | None,
 ) -> Path:
-    output_dir = Path(tempfile.gettempdir()) / "resumator-11.3-quimera"
+    output_dir = Path(tempfile.gettempdir()) / "resumator-11.4-quimera"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"resumo-quimera-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     source_pdfs = _normalize_source_pdfs(source_pdf)
     payload = {
         "version": 1,
-        "source": "Resumator 11.3",
+        "source": "Resumator 11.4",
         "target": "QUIMERA",
         "type": "resumo_peticao_inicial",
         "exported_at": datetime.now().isoformat(timespec="seconds"),

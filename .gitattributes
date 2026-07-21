@@ -1,0 +1,2 @@
+# Preserve the vendored tkinterdnd2 distribution byte-for-byte.
+vendor/** -text whitespace=-trailing-space

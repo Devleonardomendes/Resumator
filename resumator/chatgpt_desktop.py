@@ -14,6 +14,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from typing import Iterable
@@ -31,6 +32,40 @@ CHATGPT_WORK_MODE_VALUE = "STEPS_PROSE"
 CHATGPT_WORK_MODE_KEY = "conversationDetailMode"
 CHATGPT_MAIN_WINDOW_TITLES = ("chatgpt", "chatgpt work")
 CHATGPT_AUXILIARY_WINDOW_TERMS = ("dictation", "codex", "debug", "pet surface")
+GEMINI_CHROMIUM_APP_IDS = frozenset(
+    {
+        "caidcmannjgahlnbpmidmiecjcoiiigg",
+        "gdfaincndogidkdcdkhapmbffkckdkhn",
+    }
+)
+GWL_STYLE = -16
+SW_MAXIMIZE = 3
+SW_RESTORE = 9
+WS_THICKFRAME = 0x00040000
+WS_MAXIMIZEBOX = 0x00010000
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+SWP_ASYNCWINDOWPOS = 0x4000
+LOCKED_WINDOW_STYLE_MASK = WS_THICKFRAME | WS_MAXIMIZEBOX
+LOCKED_WINDOW_FRAME_FLAGS = (
+    SWP_NOSIZE
+    | SWP_NOMOVE
+    | SWP_NOZORDER
+    | SWP_NOACTIVATE
+    | SWP_FRAMECHANGED
+    | SWP_ASYNCWINDOWPOS
+)
+
+_ASSISTANT_WINDOW_LOCK = threading.RLock()
+_LOCKED_ASSISTANT_WINDOWS: dict[int, int | None] = {}
+_ORIGINAL_ASSISTANT_WINDOW_STYLES: dict[int, int] = {}
+_ASSISTANT_WINDOW_LOCK_FAILURES: set[int] = set()
+_ASSISTANT_WINDOW_LOCKS_SHUTTING_DOWN = False
+_PREFERRED_ASSISTANT_WINDOW_LOCK = threading.RLock()
+_PREFERRED_ASSISTANT_WINDOWS: dict[str, tuple[int, int]] = {}
 
 try:
     import win32clipboard  # type: ignore
@@ -77,11 +112,15 @@ class DesktopAssistant:
     display_name: str
     window_keywords: tuple[str, ...]
     process_keywords: tuple[str, ...] = ()
+    process_names: tuple[str, ...] = ()
     launch_paths: tuple[str, ...] = ()
+    shortcut_names: tuple[str, ...] = ()
     launch_commands: tuple[tuple[str, ...], ...] = ()
     launch_urls: tuple[str, ...] = ()
+    prefer_installed_launch: bool = False
     attachment_wait_seconds: float = 2.2
     require_visible_window: bool = False
+    lock_window_maximized: bool = False
     supports_clipboard_file_paste: bool = True
     supports_file_dialog_attachment: bool = False
     trust_clipboard_attachment_fallback: bool = False
@@ -161,6 +200,7 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         display_name="Microsoft 365 Copilot",
         window_keywords=("microsoft 365 copilot", "microsoft 365", "m365", "copilot"),
         process_keywords=("copilot", "officehub", "microsoft365", "m365"),
+        process_names=("chrome.exe", "msedge.exe"),
         launch_commands=(
             (
                 "explorer.exe",
@@ -221,13 +261,16 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         key="gemini",
         display_name="Google Gemini",
         window_keywords=("google gemini", "gemini"),
+        process_names=("chrome.exe", "msedge.exe"),
         launch_paths=(
             r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Chrome Apps\Google Gemini.lnk",
             r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Google Gemini.lnk",
             r"%USERPROFILE%\Desktop\Google Gemini.lnk",
             r"%PUBLIC%\Desktop\Google Gemini.lnk",
         ),
+        shortcut_names=("Gemini.lnk", "Google Gemini.lnk"),
         launch_urls=("https://gemini.google.com/app", "https://gemini.google.com/"),
+        prefer_installed_launch=True,
         attachment_wait_seconds=3.0,
         require_visible_window=True,
         supports_clipboard_file_paste=False,
@@ -263,6 +306,7 @@ ASSISTANTS: dict[str, DesktopAssistant] = {
         key="deepseek",
         display_name="DeepSeek",
         window_keywords=("deepseek", "deep seek", "chat.deepseek.com"),
+        process_names=("chrome.exe", "msedge.exe"),
         launch_paths=(
             r"%USERPROFILE%\Desktop\DeepSeek.lnk",
             r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\apps do Chrome\DeepSeek.lnk",
@@ -319,7 +363,7 @@ def open_desktop_assistant(assistant_key: str) -> AutomationResult:
         notes.append(target.note)
 
     try:
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
         if assistant.key == "chatgpt":
             target = _ensure_chatgpt_work_target(assistant, target, notes)
     except Exception as exc:  # noqa: BLE001 - opening is best-effort on selection
@@ -431,7 +475,7 @@ def _open_lmstudio_after_state_update() -> tuple[AssistantTarget | None, str]:
         hwnd, title = windows[0]
         target = AssistantTarget(hwnd=hwnd, title=title, note="LM Studio reaberto no novo chat.")
         try:
-            _activate_assistant_target(target)
+            _activate_configured_assistant_target(assistant, target)
         except Exception as exc:  # noqa: BLE001 - best-effort activation
             _log_automation(f"LM Studio Desktop: falha ao ativar janela reaberta: {exc!r}")
         return target, "LM Studio reaberto no novo chat."
@@ -655,7 +699,7 @@ def _reset_lmstudio_conversation(
 ) -> None:
     conversation.update(
         {
-            "name": "Novo chat Resumator 11.3",
+            "name": "Novo chat Resumator 11.4",
             "pinned": False,
             "createdAt": now_ms,
             "tokenCount": 0,
@@ -1091,6 +1135,8 @@ def find_assistant_windows(assistant_key: str) -> list[tuple[int, str]]:
     def collect(hwnd: int, _: object) -> bool:
         if not win32gui.IsWindowVisible(hwnd):
             return True
+        if _window_class_name(hwnd).casefold() == "#32770":
+            return True
         title = win32gui.GetWindowText(hwnd).strip()
         process_text = _process_text_for_window(hwnd)
         if _matches_assistant_window(title, process_text, assistant):
@@ -1120,6 +1166,8 @@ def _find_assistant_windows_ctypes(assistant: DesktopAssistant) -> list[tuple[in
 
     def collect(hwnd: int, _: int) -> bool:
         if not user32.IsWindowVisible(hwnd):
+            return True
+        if _window_class_name(int(hwnd)).casefold() == "#32770":
             return True
         length = user32.GetWindowTextLengthW(hwnd)
         if length <= 0:
@@ -1178,12 +1226,17 @@ def _window_area(hwnd: int) -> int:
 def _matches_assistant_window(title: str, process_text: str, assistant: DesktopAssistant) -> bool:
     title_folded = title.strip().casefold()
     process_folded = process_text.casefold()
+    process_name = Path(process_text).name.casefold() if process_text else ""
     process_matches = bool(
         process_text
-        and any(keyword.casefold() in process_folded for keyword in assistant.process_keywords)
+        and (
+            process_name in {name.casefold() for name in assistant.process_names}
+            or any(keyword.casefold() in process_folded for keyword in assistant.process_keywords)
+        )
     )
     if assistant.key == "lmstudio":
-        return process_matches
+        title_matches = any(keyword.casefold() in title_folded for keyword in assistant.window_keywords)
+        return process_matches and (not title_folded or title_matches)
 
     if assistant.key == "chatgpt":
         if not title_folded or any(term in title_folded for term in CHATGPT_AUXILIARY_WINDOW_TERMS):
@@ -1191,10 +1244,15 @@ def _matches_assistant_window(title: str, process_text: str, assistant: DesktopA
         title_matches = title_folded in CHATGPT_MAIN_WINDOW_TITLES
         return title_matches and (not process_text or process_matches)
 
-    if title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords):
-        return True
+    title_matches = bool(
+        title and any(keyword.casefold() in title_folded for keyword in assistant.window_keywords)
+    )
+    if title_matches:
+        return not (assistant.process_keywords or assistant.process_names) or process_matches
 
-    return process_matches
+    # Browser processes expose several untitled/auxiliary surfaces. Wait until the main
+    # assistant title is available instead of risking a lock on a splash or popup.
+    return False
 
 
 def _window_fallback_title(process_text: str, assistant: DesktopAssistant) -> str:
@@ -1338,9 +1396,129 @@ def _resolve_chatgpt_work_target(assistant: DesktopAssistant) -> AssistantTarget
     return AssistantTarget(hwnd=hwnd, title=title, note=" ".join(notes))
 
 
+def _resolve_preferred_installed_target(
+    assistant: DesktopAssistant,
+) -> tuple[AssistantTarget | None, bool]:
+    cached = _cached_preferred_assistant_target(assistant)
+    if cached is not None:
+        return cached, False
+
+    existing_windows = find_assistant_windows(assistant.key)
+    for hwnd, title in existing_windows:
+        if _window_matches_installed_assistant(hwnd, assistant):
+            target = AssistantTarget(hwnd=hwnd, title=title, note="Aplicativo instalado localizado.")
+            _remember_preferred_assistant_target(assistant, target)
+            return target, False
+
+    previous_handles = {hwnd for hwnd, _ in existing_windows}
+    launched, _ = _launch_installed_assistant(assistant)
+    if not launched:
+        return None, False
+
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        windows = find_assistant_windows(assistant.key)
+        for hwnd, title in windows:
+            if _window_matches_installed_assistant(hwnd, assistant):
+                target = AssistantTarget(
+                    hwnd=hwnd,
+                    title=title,
+                    note="Aplicativo instalado aberto automaticamente.",
+                )
+                _remember_preferred_assistant_target(assistant, target)
+                return target, True
+
+        new_windows = [(hwnd, title) for hwnd, title in windows if hwnd not in previous_handles]
+        if new_windows:
+            hwnd, title = new_windows[0]
+            target = AssistantTarget(
+                hwnd=hwnd,
+                title=title,
+                note="Nova janela do aplicativo instalado aberta automaticamente.",
+            )
+            _remember_preferred_assistant_target(assistant, target)
+            return target, True
+        time.sleep(0.2)
+
+    return None, True
+
+
+def _cached_preferred_assistant_target(assistant: DesktopAssistant) -> AssistantTarget | None:
+    with _PREFERRED_ASSISTANT_WINDOW_LOCK:
+        cached = _PREFERRED_ASSISTANT_WINDOWS.get(assistant.key)
+    if cached is None:
+        return None
+
+    hwnd, expected_process_id = cached
+    if not _window_exists(hwnd) or _window_process_id(hwnd) != expected_process_id:
+        with _PREFERRED_ASSISTANT_WINDOW_LOCK:
+            _PREFERRED_ASSISTANT_WINDOWS.pop(assistant.key, None)
+        return None
+
+    title = _window_text(hwnd) or assistant.display_name
+    return AssistantTarget(hwnd=hwnd, title=title, note="Janela instalada reutilizada.")
+
+
+def _remember_preferred_assistant_target(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+) -> None:
+    if target.hwnd is None:
+        return
+    process_id = _window_process_id(target.hwnd)
+    if process_id is None:
+        return
+    with _PREFERRED_ASSISTANT_WINDOW_LOCK:
+        _PREFERRED_ASSISTANT_WINDOWS[assistant.key] = (target.hwnd, process_id)
+
+
+def _window_matches_installed_assistant(hwnd: int, assistant: DesktopAssistant) -> bool:
+    if assistant.key != "gemini":
+        return False
+    app_user_model_id = _window_app_user_model_id(hwnd).casefold()
+    return any(app_id in app_user_model_id for app_id in GEMINI_CHROMIUM_APP_IDS)
+
+
+def _window_app_user_model_id(hwnd: int) -> str:
+    if not IS_WINDOWS or not hwnd:
+        return ""
+
+    com_initialized = False
+    property_store = None
+    property_value = None
+    result = ""
+    try:
+        import pythoncom  # type: ignore
+        from win32com.propsys import propsys, pscon  # type: ignore
+
+        pythoncom.CoInitialize()
+        com_initialized = True
+        property_store = propsys.SHGetPropertyStoreForWindow(hwnd, pythoncom.IID_IPropertyStore)
+        property_value = property_store.GetValue(pscon.PKEY_AppUserModel_ID)
+        raw_value = property_value.GetValue() if hasattr(property_value, "GetValue") else property_value
+        result = str(raw_value or "").strip()
+    except Exception:
+        result = ""
+    finally:
+        property_value = None
+        property_store = None
+        if com_initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+    return result
+
+
 def _resolve_assistant_target(assistant: DesktopAssistant) -> AssistantTarget | None:
     if assistant.key == "chatgpt":
         return _resolve_chatgpt_work_target(assistant)
+
+    installed_launch_attempted = False
+    if assistant.prefer_installed_launch:
+        preferred_target, installed_launch_attempted = _resolve_preferred_installed_target(assistant)
+        if preferred_target is not None:
+            return preferred_target
 
     windows = find_assistant_windows(assistant.key)
     if windows:
@@ -1348,7 +1526,10 @@ def _resolve_assistant_target(assistant: DesktopAssistant) -> AssistantTarget | 
         return AssistantTarget(hwnd=hwnd, title=title)
 
     if assistant.require_visible_window:
-        launched, _ = _launch_assistant(assistant)
+        if installed_launch_attempted:
+            launched, _ = _launch_assistant_urls(assistant)
+        else:
+            launched, _ = _launch_assistant(assistant)
         if launched:
             windows = _wait_for_assistant_window(assistant, timeout_seconds=10.0)
             if windows:
@@ -1495,18 +1676,34 @@ def _process_image_path(pid: int) -> str:
 
 
 def _launch_assistant(assistant: DesktopAssistant) -> tuple[bool, int | None]:
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
     if assistant.launch_urls_first:
         launched, launched_pid = _launch_assistant_urls(assistant)
         if launched:
             return launched, launched_pid
 
-    for path in _candidate_launch_paths(assistant.launch_paths):
+    launched, launched_pid = _launch_installed_assistant(assistant)
+    if launched:
+        return launched, launched_pid
+
+    if not assistant.launch_urls_first:
+        launched, launched_pid = _launch_assistant_urls(assistant)
+        if launched:
+            return launched, launched_pid
+
+    return False, None
+
+
+def _launch_installed_assistant(assistant: DesktopAssistant) -> tuple[bool, int | None]:
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    for path in _assistant_candidate_launch_paths(assistant):
         if not path.exists():
             continue
         try:
             if path.suffix.casefold() in {".lnk", ".url"}:
+                if path.suffix.casefold() == ".lnk" and not _shortcut_matches_assistant(path, assistant):
+                    _log_automation(f"{assistant.display_name}: atalho rejeitado por identidade: {path}")
+                    continue
                 os.startfile(str(path))  # type: ignore[attr-defined]
                 _log_automation(f"{assistant.display_name}: atalho aberto: {path}")
                 return True, None
@@ -1525,12 +1722,68 @@ def _launch_assistant(assistant: DesktopAssistant) -> tuple[bool, int | None]:
         except Exception as exc:  # noqa: BLE001 - best-effort fallback
             _log_automation(f"{assistant.display_name}: falha ao executar {command}: {exc!r}")
 
-    if not assistant.launch_urls_first:
-        launched, launched_pid = _launch_assistant_urls(assistant)
-        if launched:
-            return launched, launched_pid
-
     return False, None
+
+
+def _assistant_candidate_launch_paths(assistant: DesktopAssistant) -> list[Path]:
+    return _deduplicate_candidate_paths(
+        [
+            *_candidate_launch_paths(assistant.launch_paths),
+            *_candidate_shortcut_paths(assistant.shortcut_names),
+        ]
+    )
+
+
+def _shortcut_matches_assistant(path: Path, assistant: DesktopAssistant) -> bool:
+    if not assistant.shortcut_names:
+        return True
+    expected_names = {name.casefold() for name in assistant.shortcut_names}
+    if path.name.casefold() not in expected_names:
+        return False
+    if assistant.key != "gemini":
+        return True
+
+    metadata = _windows_shortcut_metadata(path)
+    if metadata is None:
+        return False
+    target_path, arguments = metadata
+    target_name = Path(target_path).name.casefold()
+    if target_name not in {"chrome_proxy.exe", "chrome.exe", "msedge_proxy.exe", "msedge.exe"}:
+        return False
+    arguments_folded = arguments.casefold()
+    return any(
+        re.search(rf"(?:--app-id(?:=|\s+))['\"]?{re.escape(app_id)}(?:['\"\s]|$)", arguments_folded)
+        for app_id in GEMINI_CHROMIUM_APP_IDS
+    )
+
+
+def _windows_shortcut_metadata(path: Path) -> tuple[str, str] | None:
+    if not IS_WINDOWS:
+        return None
+    com_initialized = False
+    shortcut = None
+    metadata: tuple[str, str] | None = None
+    try:
+        import pythoncom  # type: ignore
+        from win32com.client import Dispatch  # type: ignore
+
+        pythoncom.CoInitialize()
+        com_initialized = True
+        shortcut = Dispatch("WScript.Shell").CreateShortcut(str(path))
+        target_path = str(shortcut.TargetPath or "").strip()
+        arguments = str(shortcut.Arguments or "").strip()
+        if target_path:
+            metadata = (target_path, arguments)
+    except Exception as exc:  # noqa: BLE001 - invalid/stale shortcuts are skipped safely
+        _log_automation(f"Falha ao inspecionar atalho {path}: {exc!r}")
+    finally:
+        shortcut = None
+        if com_initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+    return metadata
 
 
 def _candidate_launch_paths(raw_paths: tuple[str, ...]) -> list[Path]:
@@ -1547,6 +1800,73 @@ def _candidate_launch_paths(raw_paths: tuple[str, ...]) -> list[Path]:
             continue
         candidates.extend(sorted(parent.glob(pattern_path.name), reverse=True))
     return candidates
+
+
+def _windows_shortcut_roots() -> list[Path]:
+    """Return localized/redirected Windows locations that contain application shortcuts."""
+    roots: list[Path] = []
+
+    if IS_WINDOWS:
+        # CSIDL values remain supported and resolve redirected folders without depending on
+        # localized display names such as "Chrome Apps" or "apps do Chrome".
+        for csidl in (0x0002, 0x0017, 0x0010, 0x0019):
+            try:
+                buffer = ctypes.create_unicode_buffer(32768)
+                result = ctypes.windll.shell32.SHGetFolderPathW(None, csidl, None, 0, buffer)
+                if result == 0 and buffer.value.strip():
+                    roots.append(Path(buffer.value.strip()))
+            except Exception:
+                continue
+
+    fallback_roots = (
+        (os.environ.get("APPDATA"), ("Microsoft", "Windows", "Start Menu", "Programs")),
+        (os.environ.get("PROGRAMDATA"), ("Microsoft", "Windows", "Start Menu", "Programs")),
+        (os.environ.get("USERPROFILE"), ("Desktop",)),
+        (os.environ.get("PUBLIC"), ("Desktop",)),
+    )
+    for base, parts in fallback_roots:
+        if base:
+            roots.append(Path(base).joinpath(*parts))
+
+    return _deduplicate_candidate_paths(roots)
+
+
+def _candidate_shortcut_paths(shortcut_names: tuple[str, ...]) -> list[Path]:
+    """Find exact shortcut names recursively below Windows shortcut roots."""
+    expected_names = {name.strip().casefold() for name in shortcut_names if name.strip()}
+    if not expected_names:
+        return []
+
+    candidates: list[Path] = []
+    for root in _windows_shortcut_roots():
+        if not root.exists() or not root.is_dir():
+            continue
+        root_candidates: list[Path] = []
+        try:
+            for candidate in root.rglob("*"):
+                if not candidate.is_file() or candidate.suffix.casefold() != ".lnk":
+                    continue
+                if candidate.name.casefold() in expected_names:
+                    root_candidates.append(candidate)
+        except OSError as exc:
+            _log_automation(f"Falha ao procurar atalhos em {root}: {exc!r}")
+        candidates.extend(sorted(root_candidates, key=lambda candidate: os.path.normcase(str(candidate))))
+    return _deduplicate_candidate_paths(candidates)
+
+
+def _deduplicate_candidate_paths(paths: Iterable[Path]) -> list[Path]:
+    deduplicated: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        try:
+            identity = os.path.normcase(os.path.abspath(str(path)))
+        except OSError:
+            identity = os.path.normcase(str(path))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduplicated.append(path)
+    return deduplicated
 
 
 def _launch_assistant_urls(assistant: DesktopAssistant) -> tuple[bool, int | None]:
@@ -1639,7 +1959,7 @@ def send_to_desktop_assistant(
         notes.append(target.note)
 
     try:
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
         time.sleep(0.6)
         target = _prepare_assistant_for_send(assistant, target, notes)
         title = target.title
@@ -1744,7 +2064,7 @@ def _ensure_chatgpt_work_target(
         if candidate.hwnd is None:
             continue
         try:
-            _activate_assistant_target(candidate)
+            _activate_configured_assistant_target(assistant, candidate)
             time.sleep(0.25)
         except Exception as exc:  # noqa: BLE001 - try the next valid ChatGPT window
             details.append(f"janela {candidate.hwnd}: ativacao falhou ({exc})")
@@ -1766,7 +2086,7 @@ def _ensure_chatgpt_work_target(
             details.append(f"janela {candidate.hwnd}: {detail}")
             continue
 
-        _activate_assistant_target(candidate)
+        _activate_configured_assistant_target(assistant, candidate)
         if detail.startswith("ALREADY_WORK|"):
             notes.append("ChatGPT Work ja estava selecionado.")
         else:
@@ -1793,7 +2113,7 @@ def _prepare_copilot_new_chat(
         time.sleep(2.2)
         refreshed = _assistant_target_from_current_windows(assistant, target)
         target = refreshed
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
         time.sleep(0.5)
 
     if target.hwnd is None:
@@ -1869,7 +2189,7 @@ def capture_latest_response_from_assistant(assistant_key: str) -> AutomationResu
             notes.append(f"Nao foi possivel preservar o texto anterior da area de transferencia: {exc}")
 
         _set_clipboard_text(sentinel)
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
         time.sleep(0.5)
 
         invoked, detail = _invoke_copy_response_action(assistant, target)
@@ -2747,7 +3067,7 @@ def _attach_files_to_assistant(
     if assistant.supports_clipboard_file_paste:
         attached = _copy_files_to_clipboard(file_paths)
         if attached:
-            _activate_assistant_target(target)
+            _activate_configured_assistant_target(assistant, target)
             _hotkey("ctrl", "v")
             time.sleep(upload_wait_seconds)
             return AttachmentResult(True, [_attachment_note(file_paths)])
@@ -2767,7 +3087,7 @@ def _attach_files_to_assistant(
 
         clipboard_attempted = _copy_files_to_clipboard(file_paths)
         if clipboard_attempted:
-            _activate_assistant_target(target)
+            _activate_configured_assistant_target(assistant, target)
             _hotkey("ctrl", "v")
             time.sleep(upload_wait_seconds)
             if assistant.trust_clipboard_attachment_fallback:
@@ -3139,10 +3459,18 @@ def _select_files_in_open_dialog(file_paths: list[Path], wait_seconds: float) ->
     _set_clipboard_text(_file_dialog_selection_text(file_paths))
     time.sleep(0.1)
     dialog_target = AssistantTarget(hwnd=dialog_hwnd, title=_window_text(dialog_hwnd) or "Seletor de arquivos")
-    _activate_assistant_target(dialog_target)
+    _activate_assistant_target(
+        dialog_target,
+        lock_maximized=False,
+        restore_unlocked=True,
+    )
     _hotkey("ctrl", "v")
     time.sleep(0.2)
-    _activate_assistant_target(dialog_target)
+    _activate_assistant_target(
+        dialog_target,
+        lock_maximized=False,
+        restore_unlocked=True,
+    )
     _press("enter")
     time.sleep(wait_seconds)
     return True
@@ -3260,9 +3588,18 @@ def _assistant_uses_manual_attachment(assistant_key: str | None) -> bool:
     return bool(assistant and not assistant.supports_clipboard_file_paste)
 
 
-def _activate_assistant_target(target: AssistantTarget) -> None:
+def _activate_assistant_target(
+    target: AssistantTarget,
+    *,
+    lock_maximized: bool = False,
+    restore_unlocked: bool = False,
+) -> None:
     if target.hwnd is not None:
-        _activate_window(target.hwnd)
+        _activate_window(
+            target.hwnd,
+            lock_maximized=lock_maximized,
+            restore_unlocked=restore_unlocked,
+        )
         for _ in range(15):
             if _foreground_window_handle() == target.hwnd:
                 return
@@ -3282,13 +3619,25 @@ def _activate_assistant_target(target: AssistantTarget) -> None:
     raise AutomationError("Não foi possível trazer a janela do aplicativo para frente.")
 
 
+def _activate_configured_assistant_target(
+    assistant: DesktopAssistant,
+    target: AssistantTarget,
+) -> None:
+    """Activate an assistant while honoring its window-state policy."""
+    _activate_assistant_target(
+        target,
+        lock_maximized=assistant.lock_window_maximized,
+        restore_unlocked=False,
+    )
+
+
 def _activate_assistant_for_keyboard_input(
     assistant: DesktopAssistant,
     target: AssistantTarget,
 ) -> None:
     """Activate the assistant and, for web PWAs, focus the message composer."""
     if not assistant.composer_terms:
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
         return
 
     hwnd = target.hwnd
@@ -3298,7 +3647,7 @@ def _activate_assistant_for_keyboard_input(
         )
 
     if _foreground_window_handle() != hwnd:
-        _activate_assistant_target(target)
+        _activate_configured_assistant_target(assistant, target)
 
     focused, detail = _focus_assistant_composer(hwnd, assistant.composer_terms)
     _log_automation(f"{assistant.display_name}: foco do campo de mensagem: {detail}")
@@ -3567,17 +3916,221 @@ try {
     return success, status or f"FAILED|retorno={completed.returncode}"
 
 
-def _activate_window(hwnd: int) -> None:
-    if win32gui is None or win32con is None:
-        user32 = ctypes.windll.user32
-        user32.ShowWindow(wintypes.HWND(hwnd), 9)
-        user32.SetForegroundWindow(wintypes.HWND(hwnd))
-        return
-    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+def _activate_window(
+    hwnd: int,
+    *,
+    lock_maximized: bool = False,
+    restore_unlocked: bool = False,
+) -> None:
+    if lock_maximized:
+        if not _lock_assistant_window_maximized(hwnd):
+            raise AutomationError("Nao foi possivel maximizar e bloquear o redimensionamento da janela da IA.")
+    elif restore_unlocked:
+        _show_window_state(hwnd, SW_RESTORE)
+
     try:
-        win32gui.SetForegroundWindow(hwnd)
+        if win32gui is not None:
+            win32gui.SetForegroundWindow(hwnd)
+            return
     except Exception:
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        pass
+    ctypes.windll.user32.SetForegroundWindow(wintypes.HWND(hwnd))
+
+
+def _lock_assistant_window_maximized(hwnd: int) -> bool:
+    """Maximize an assistant HWND, remove resize controls, and remember it for enforcement."""
+    if not IS_WINDOWS or not hwnd:
+        return False
+
+    try:
+        with _ASSISTANT_WINDOW_LOCK:
+            if _ASSISTANT_WINDOW_LOCKS_SHUTTING_DOWN or not _window_exists(hwnd):
+                return False
+            style = _get_window_style(hwnd)
+            process_id = _window_process_id(hwnd)
+            if process_id is None:
+                return False
+            _ORIGINAL_ASSISTANT_WINDOW_STYLES.setdefault(hwnd, style)
+            _LOCKED_ASSISTANT_WINDOWS[hwnd] = process_id
+            _apply_assistant_window_lock(hwnd)
+            _ASSISTANT_WINDOW_LOCK_FAILURES.discard(hwnd)
+            return True
+    except Exception as exc:  # noqa: BLE001 - window style changes are best-effort
+        _log_window_lock_failure_once(hwnd, exc)
+        return False
+
+
+def enforce_assistant_window_locks() -> None:
+    """Reapply maximize/resize locks to every assistant window opened by this process."""
+    if not IS_WINDOWS:
+        return
+
+    with _ASSISTANT_WINDOW_LOCK:
+        if _ASSISTANT_WINDOW_LOCKS_SHUTTING_DOWN:
+            return
+        for hwnd, expected_process_id in list(_LOCKED_ASSISTANT_WINDOWS.items()):
+            try:
+                if not _window_exists(hwnd):
+                    _forget_locked_assistant_window(hwnd)
+                    continue
+                current_process_id = _window_process_id(hwnd)
+                if current_process_id is None or current_process_id != expected_process_id:
+                    _forget_locked_assistant_window(hwnd)
+                    continue
+                _apply_assistant_window_lock(hwnd)
+                _ASSISTANT_WINDOW_LOCK_FAILURES.discard(hwnd)
+            except Exception as exc:  # noqa: BLE001 - enforcement must never interrupt the UI
+                _log_window_lock_failure_once(hwnd, exc)
+
+
+def release_assistant_window_locks() -> None:
+    """Restore resize styles when Resumator closes so external apps are not changed permanently."""
+    global _ASSISTANT_WINDOW_LOCKS_SHUTTING_DOWN
+
+    with _ASSISTANT_WINDOW_LOCK:
+        _ASSISTANT_WINDOW_LOCKS_SHUTTING_DOWN = True
+        tracked = dict(_LOCKED_ASSISTANT_WINDOWS)
+        original_styles = dict(_ORIGINAL_ASSISTANT_WINDOW_STYLES)
+        for hwnd, original_style in original_styles.items():
+            try:
+                if not _window_exists(hwnd):
+                    continue
+                expected_process_id = tracked.get(hwnd)
+                current_process_id = _window_process_id(hwnd)
+                if current_process_id is None or current_process_id != expected_process_id:
+                    continue
+                current_style = _get_window_style(hwnd)
+                restored_style = current_style | (original_style & LOCKED_WINDOW_STYLE_MASK)
+                if current_style != restored_style:
+                    _set_window_style(hwnd, restored_style)
+                    _refresh_window_frame(hwnd)
+                    verified_style = _get_window_style(hwnd)
+                    expected_resize_bits = original_style & LOCKED_WINDOW_STYLE_MASK
+                    if (verified_style & LOCKED_WINDOW_STYLE_MASK) != expected_resize_bits:
+                        raise OSError("O Windows recusou a restauracao do redimensionamento da janela.")
+            except Exception as exc:  # noqa: BLE001 - closing must continue if another app rejects access
+                _log_automation(f"Falha ao restaurar redimensionamento da janela {hwnd}: {exc!r}")
+        _LOCKED_ASSISTANT_WINDOWS.clear()
+        _ORIGINAL_ASSISTANT_WINDOW_STYLES.clear()
+        _ASSISTANT_WINDOW_LOCK_FAILURES.clear()
+    with _PREFERRED_ASSISTANT_WINDOW_LOCK:
+        _PREFERRED_ASSISTANT_WINDOWS.clear()
+
+
+def _apply_assistant_window_lock(hwnd: int) -> None:
+    if not _window_is_maximized(hwnd):
+        _show_window_state(hwnd, SW_MAXIMIZE)
+
+    style = _get_window_style(hwnd)
+    locked_style = style & ~LOCKED_WINDOW_STYLE_MASK
+    if locked_style != style:
+        _set_window_style(hwnd, locked_style)
+        _refresh_window_frame(hwnd)
+    verified_style = _get_window_style(hwnd)
+    if verified_style & LOCKED_WINDOW_STYLE_MASK:
+        raise AutomationError("O Windows recusou o bloqueio de redimensionamento da janela da IA.")
+
+
+def _show_window_state(hwnd: int, command: int) -> None:
+    user32 = ctypes.windll.user32
+    try:
+        user32.ShowWindowAsync.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.ShowWindowAsync.restype = wintypes.BOOL
+        if user32.ShowWindowAsync(wintypes.HWND(hwnd), int(command)):
+            return
+    except Exception:
+        pass
+
+    if win32gui is not None:
+        win32gui.ShowWindow(hwnd, int(command))
+        return
+    user32.ShowWindow(wintypes.HWND(hwnd), int(command))
+
+
+def _window_exists(hwnd: int) -> bool:
+    try:
+        if win32gui is not None:
+            return bool(win32gui.IsWindow(hwnd))
+        return bool(ctypes.windll.user32.IsWindow(wintypes.HWND(hwnd)))
+    except Exception:
+        return False
+
+
+def _window_is_maximized(hwnd: int) -> bool:
+    if win32gui is not None:
+        return bool(win32gui.IsZoomed(hwnd))
+    return bool(ctypes.windll.user32.IsZoomed(wintypes.HWND(hwnd)))
+
+
+def _window_process_id(hwnd: int) -> int | None:
+    process_id = wintypes.DWORD()
+    user32 = ctypes.windll.user32
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(process_id))
+    return int(process_id.value) if process_id.value else None
+
+
+def _get_window_style(hwnd: int) -> int:
+    if win32gui is not None:
+        return int(win32gui.GetWindowLong(hwnd, GWL_STYLE))
+    user32 = ctypes.windll.user32
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    return int(user32.GetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE))
+
+
+def _set_window_style(hwnd: int, style: int) -> None:
+    if win32gui is not None:
+        win32gui.SetWindowLong(hwnd, GWL_STYLE, int(style))
+        return
+    user32 = ctypes.windll.user32
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    user32.SetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowLongW(wintypes.HWND(hwnd), GWL_STYLE, ctypes.c_long(style))
+
+
+def _refresh_window_frame(hwnd: int) -> None:
+    if win32gui is not None:
+        win32gui.SetWindowPos(hwnd, 0, 0, 0, 0, 0, LOCKED_WINDOW_FRAME_FLAGS)
+        return
+    user32 = ctypes.windll.user32
+    user32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.UINT,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    changed = user32.SetWindowPos(
+        wintypes.HWND(hwnd),
+        wintypes.HWND(0),
+        0,
+        0,
+        0,
+        0,
+        LOCKED_WINDOW_FRAME_FLAGS,
+    )
+    if not changed:
+        raise OSError("SetWindowPos recusou a atualizacao da moldura da janela.")
+
+
+def _forget_locked_assistant_window(hwnd: int) -> None:
+    with _ASSISTANT_WINDOW_LOCK:
+        _LOCKED_ASSISTANT_WINDOWS.pop(hwnd, None)
+        _ORIGINAL_ASSISTANT_WINDOW_STYLES.pop(hwnd, None)
+        _ASSISTANT_WINDOW_LOCK_FAILURES.discard(hwnd)
+
+
+def _log_window_lock_failure_once(hwnd: int, exc: Exception) -> None:
+    with _ASSISTANT_WINDOW_LOCK:
+        if hwnd in _ASSISTANT_WINDOW_LOCK_FAILURES:
+            return
+        _ASSISTANT_WINDOW_LOCK_FAILURES.add(hwnd)
+    _log_automation(f"Falha ao manter a janela {hwnd} maximizada e bloqueada: {exc!r}")
 
 
 def _activate_process(pid: int) -> bool:
