@@ -6,12 +6,6 @@ Aplicativo Windows para montar prompts de analise documental, enviar ate 10 PDFs
 
 Baixe o instalador Windows em [`downloads/Resumator_11.4_Setup.exe`](downloads/Resumator_11.4_Setup.exe).
 
-Versao 11.4: mantem todos os recursos e correcoes da versao 11.3 e substitui a confirmacao exibida apos a exportacao em DOCX ou PDF por uma animacao de 3 segundos com a risada do personagem.
-
-Versao 11.3: mantem o comportamento da versao anterior e corrige a colagem de texto no Microsoft 365 Copilot e no Google Gemini. Antes de colar ou enviar, o Resumator localiza e confirma o foco no campo de mensagem; se isso nao for possivel, interrompe a automacao para evitar colagem no local errado.
-
-Revisao de estabilidade da versao 11.3: o atalho instalado do Gemini agora e localizado recursivamente nas pastas de aplicativos do Windows, independentemente do idioma da pasta ou do nome `Gemini`/`Google Gemini`. O Resumator abre maximizado pelo modo nativo do Windows, sem tela cheia e sem cobrir a barra de tarefas. ChatGPT Work, Microsoft 365 Copilot, Google Gemini, LM Studio Desktop e DeepSeek sao apenas trazidos para frente: tamanho, estado e controles de redimensionamento de suas janelas nao sao alterados. Para Copilot e Gemini, "Enviar ao final" permanece bloqueado; com mais de um PDF, a anexacao automatica inicia desmarcada e pode ser habilitada manualmente.
-
 ## Assistente de Prompt
 
 O botao "Assistente" abre uma janela grande com alternativas de escolha unica para:
@@ -94,7 +88,7 @@ PDF e DOCX exportados usam o formato `Resumator_(numero do processo)_(IA)`, por 
 
 ## Integracao com QUIMERA
 
-O botao direto usa o argumento --summary-file e prefere o QUIMERA 4.2, mantendo o QUIMERA 4.1 como fallback. A exportacao manual em JSON continua disponivel como alternativa.
+O Quimera é um aplicativo para fazer petições e ainda está em desenvolvimento.
 
 ## Arquivos principais
 
